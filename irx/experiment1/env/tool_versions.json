@@ -1,0 +1,4 @@
+{
+  "required_binaries": ["llvm-as", "opt", "lli", "llc", "clang"],
+  "detected": {}
+}

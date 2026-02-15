@@ -1,0 +1,28 @@
+{
+  "task_name": "sum_u32_le",
+  "abi": {
+    "function": "f",
+    "signature_ir": "i32 @f(i8* %in_ptr, i32 %in_len, i8* %out_ptr, i32 %out_cap)"
+  },
+  "return_semantics": "Returns bytes written on success; negative error code on failure.",
+  "memory_rules": {
+    "input_immutable": true,
+    "no_overlap": true,
+    "no_alignment_assumptions": true,
+    "no_output_writes_on_error": true
+  },
+  "task_rules": [
+    "Input is valid only if in_len % 4 == 0.",
+    "Interpret input as consecutive little-endian u32 values.",
+    "Compute the sum modulo 2^32.",
+    "Write exactly 4 bytes little-endian result to out_ptr on success.",
+    "Return 4 on success."
+  ],
+  "errors": {
+    "ERR_INVALID_INPUT": -1,
+    "ERR_OUTPUT_TOO_SMALL": -2,
+    "ERR_INTERNAL": -3
+  },
+  "output_cap_rule": "Require out_cap >= 4 for success.",
+  "output_encoding": "4-byte little-endian unsigned integer"
+}

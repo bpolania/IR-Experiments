@@ -1,0 +1,75 @@
+{
+  "task_name": "parse_u32_decimal",
+  "vectors": [
+    {
+      "test_id": "t01",
+      "in_hex": "30",
+      "out_cap": 4,
+      "expected_ret": 4,
+      "expected_out_hex": "00000000"
+    },
+    {
+      "test_id": "t02",
+      "in_hex": "35",
+      "out_cap": 4,
+      "expected_ret": 4,
+      "expected_out_hex": "05000000"
+    },
+    {
+      "test_id": "t03",
+      "in_hex": "3130",
+      "out_cap": 4,
+      "expected_ret": 4,
+      "expected_out_hex": "0a000000"
+    },
+    {
+      "test_id": "t04",
+      "in_hex": "30303033",
+      "out_cap": 4,
+      "expected_ret": 4,
+      "expected_out_hex": "03000000"
+    },
+    {
+      "test_id": "t05",
+      "in_hex": "34323934393637323935",
+      "out_cap": 4,
+      "expected_ret": 4,
+      "expected_out_hex": "ffffffff"
+    },
+    {
+      "test_id": "t06",
+      "in_hex": "34323934393637323936",
+      "out_cap": 4,
+      "expected_ret": -1,
+      "expected_out_hex": ""
+    },
+    {
+      "test_id": "t07",
+      "in_hex": "",
+      "out_cap": 4,
+      "expected_ret": -1,
+      "expected_out_hex": ""
+    },
+    {
+      "test_id": "t08",
+      "in_hex": "2d31",
+      "out_cap": 4,
+      "expected_ret": -1,
+      "expected_out_hex": ""
+    },
+    {
+      "test_id": "t09",
+      "in_hex": "31323334353637383930",
+      "out_cap": 4,
+      "expected_ret": 4,
+      "expected_out_hex": "d2029649"
+    },
+    {
+      "test_id": "t10",
+      "in_hex": "31323378",
+      "out_cap": 4,
+      "expected_ret": -1,
+      "expected_out_hex": ""
+    }
+  ]
+}

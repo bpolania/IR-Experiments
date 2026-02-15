@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/irx/experiment1/harness/result_schema.json",
+  "title": "IRX Experiment 1 Result Schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "experiment",
+    "task",
+    "candidate_id",
+    "run_id",
+    "timestamps",
+    "gates",
+    "runs",
+    "metrics",
+    "verdict"
+  ],
+  "properties": {
+    "experiment": {
+      "type": "string"
+    },
+    "task": {
+      "type": "string"
+    },
+    "candidate_id": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "timestamps": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["started_at", "finished_at"],
+      "properties": {
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finished_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parse", "verify", "policy", "tests"],
+      "properties": {
+        "parse": {
+          "$ref": "#/$defs/gateStatus"
+        },
+        "verify": {
+          "$ref": "#/$defs/gateStatus"
+        },
+        "policy": {
+          "$ref": "#/$defs/gateStatus"
+        },
+        "tests": {
+          "$ref": "#/$defs/gateStatus"
+        }
+      }
+    },
+    "runs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/runRecord"
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tests_total",
+        "tests_passed",
+        "tests_failed",
+        "ret_mismatches",
+        "output_mismatches",
+        "timeouts",
+        "crashes"
+      ],
+      "properties": {
+        "tests_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tests_passed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tests_failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ret_mismatches": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_mismatches": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "timeouts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "crashes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["PASS", "FAIL", "ERROR"]
+    }
+  },
+  "$defs": {
+    "gateStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "detail"],
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "detail": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "crash": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["type", "signal", "detail"],
+      "properties": {
+        "type": {
+          "type": ["string", "null"],
+          "enum": [
+            "SIGSEGV",
+            "SIGILL",
+            "SIGABRT",
+            "SIGFPE",
+            "TIMEOUT",
+            "OOM",
+            "SANITIZER_FINDING",
+            "POLICY_VIOLATION",
+            "VERIFY_FAIL",
+            "PARSE_FAIL",
+            null
+          ]
+        },
+        "signal": {
+          "type": ["integer", "null"]
+        },
+        "detail": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "runRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "ok",
+        "exit_code",
+        "duration_ms",
+        "rss_mib",
+        "crash"
+      ],
+      "properties": {
+        "stage": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "exit_code": {
+          "type": ["integer", "null"]
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rss_mib": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "crash": {
+          "$ref": "#/$defs/crash"
+        }
+      }
+    }
+  }
+}

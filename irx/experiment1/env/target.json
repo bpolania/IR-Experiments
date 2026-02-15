@@ -1,0 +1,6 @@
+{
+  "os": "raspios64",
+  "arch": "aarch64",
+  "triple": "aarch64-unknown-linux-gnu",
+  "endian": "little"
+}

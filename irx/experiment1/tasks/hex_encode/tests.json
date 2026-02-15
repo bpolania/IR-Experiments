@@ -1,0 +1,75 @@
+{
+  "task_name": "hex_encode",
+  "vectors": [
+    {
+      "test_id": "t01",
+      "in_hex": "",
+      "out_cap": 0,
+      "expected_ret": 0,
+      "expected_out_hex": ""
+    },
+    {
+      "test_id": "t02",
+      "in_hex": "00",
+      "out_cap": 2,
+      "expected_ret": 2,
+      "expected_out_hex": "3030"
+    },
+    {
+      "test_id": "t03",
+      "in_hex": "01",
+      "out_cap": 2,
+      "expected_ret": 2,
+      "expected_out_hex": "3031"
+    },
+    {
+      "test_id": "t04",
+      "in_hex": "0f",
+      "out_cap": 2,
+      "expected_ret": 2,
+      "expected_out_hex": "3066"
+    },
+    {
+      "test_id": "t05",
+      "in_hex": "10",
+      "out_cap": 1,
+      "expected_ret": -2,
+      "expected_out_hex": ""
+    },
+    {
+      "test_id": "t06",
+      "in_hex": "ff",
+      "out_cap": 2,
+      "expected_ret": 2,
+      "expected_out_hex": "6666"
+    },
+    {
+      "test_id": "t07",
+      "in_hex": "deadbeef",
+      "out_cap": 8,
+      "expected_ret": 8,
+      "expected_out_hex": "6465616462656566"
+    },
+    {
+      "test_id": "t08",
+      "in_hex": "123456",
+      "out_cap": 6,
+      "expected_ret": 6,
+      "expected_out_hex": "313233343536"
+    },
+    {
+      "test_id": "t09",
+      "in_hex": "00010203040506070809",
+      "out_cap": 20,
+      "expected_ret": 20,
+      "expected_out_hex": "3030303130323033303430353036303730383039"
+    },
+    {
+      "test_id": "t10",
+      "in_hex": "48656c6c6f",
+      "out_cap": 10,
+      "expected_ret": 10,
+      "expected_out_hex": "34383635366336633666"
+    }
+  ]
+}

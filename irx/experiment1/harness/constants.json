@@ -1,0 +1,36 @@
+{
+  "experiment": "1",
+  "abi": {
+    "function": "f",
+    "signature_ir": "i32 @f(i8* %in_ptr, i32 %in_len, i8* %out_ptr, i32 %out_cap)"
+  },
+  "errors": {
+    "ERR_INVALID_INPUT": -1,
+    "ERR_OUTPUT_TOO_SMALL": -2,
+    "ERR_INTERNAL": -3
+  },
+  "limits": {
+    "max_ll_bytes": 65536,
+    "max_ll_lines": 2000,
+    "max_basic_blocks": 200,
+    "max_instructions": 20000,
+    "max_alloca_bytes_total": 4096,
+    "timeout_stage_ms": 1000,
+    "timeout_per_test_ms": 50,
+    "max_rss_mib": 64,
+    "max_input_bytes": 65536,
+    "max_output_bytes": 65536
+  },
+  "crash_types": [
+    "SIGSEGV",
+    "SIGILL",
+    "SIGABRT",
+    "SIGFPE",
+    "TIMEOUT",
+    "OOM",
+    "SANITIZER_FINDING",
+    "POLICY_VIOLATION",
+    "VERIFY_FAIL",
+    "PARSE_FAIL"
+  ]
+}
