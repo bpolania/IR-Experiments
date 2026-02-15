@@ -8,33 +8,33 @@
   ],
   "detected": {
     "llvm-as": {
-      "ok": false,
-      "path": null,
-      "version_text": null,
-      "error": "not found"
+      "ok": true,
+      "path": "/usr/lib/llvm-19/bin/llvm-as",
+      "version_text": "Debian LLVM version 19.1.7\n  Optimized build.",
+      "error": null
     },
     "opt": {
-      "ok": false,
-      "path": null,
-      "version_text": null,
-      "error": "not found"
+      "ok": true,
+      "path": "/usr/lib/llvm-19/bin/opt",
+      "version_text": "Debian LLVM version 19.1.7\n  Optimized build.\n  Default target: aarch64-unknown-linux-gnu\n  Host CPU: cortex-a76",
+      "error": null
     },
     "lli": {
-      "ok": false,
-      "path": null,
-      "version_text": null,
-      "error": "not found"
+      "ok": true,
+      "path": "/usr/lib/llvm-19/bin/lli",
+      "version_text": "Debian LLVM version 19.1.7\n  Optimized build.",
+      "error": null
     },
     "llc": {
-      "ok": false,
-      "path": null,
-      "version_text": null,
-      "error": "not found"
+      "ok": true,
+      "path": "/usr/lib/llvm-19/bin/llc",
+      "version_text": "Debian LLVM version 19.1.7\n  Optimized build.\n  Default target: aarch64-unknown-linux-gnu\n  Host CPU: cortex-a76\n\n  Registered Targets:\n    aarch64     - AArch64 (little endian)\n    aarch64_32  - AArch64 (little endian ILP32)\n    aarch64_be  - AArch64 (big endian)\n    amdgcn      - AMD GCN GPUs\n    arm         - ARM\n    arm64       - ARM64 (little endian)\n    arm64_32    - ARM64 (little endian ILP32)\n    armeb       - ARM (big endian)\n    avr         - Atmel AVR Microcontroller\n    bpf         - BPF (host endian)\n    bpfeb       - BPF (big endian)\n    bpfel       - BPF (little endian)\n    hexagon     - Hexagon\n    lanai       - Lanai\n    loongarch32 - 32-bit LoongArch\n    loongarch64 - 64-bit LoongArch\n    m68k        - Motorola 68000 family\n    mips        - MIPS (32-bit big endian)\n    mips64      - MIPS (64-bit big endian)\n    mips64el    - MIPS (64-bit little endian)\n    mipsel      - MIPS (32-bit little endian)\n    msp430      - MSP430 [experimental]\n    nvptx       - NVIDIA PTX 32-bit\n    nvptx64     - NVIDIA PTX 64-bit\n    ppc32       - PowerPC 32\n    ppc32le     - PowerPC 32 LE\n    ppc64       - PowerPC 64\n    ppc64le     - PowerPC 64 LE\n    r600        - AMD GPUs HD2XXX-HD6XXX\n    riscv32     - 32-bit RISC-V\n    riscv64     - 64-bit RISC-V\n    sparc       - Sparc\n    sparcel     - Sparc LE\n    sparcv9     - Sparc V9\n    systemz     - SystemZ\n    thumb       - Thumb\n    thumbeb     - Thumb (big endian)\n    ve          - VE\n    wasm32      - WebAssembly 32-bit\n    wasm64      - WebAssembly 64-bit\n    x86         - 32-bit X86: Pentium-Pro and above\n    x86-64      - 64-bit X86: EM64T and AMD64\n    xcore       - XCore\n    xtensa      - Xtensa 32",
+      "error": null
     },
     "clang": {
       "ok": true,
-      "path": "/usr/bin/clang",
-      "version_text": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.5.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin",
+      "path": "/usr/lib/llvm-19/bin/clang",
+      "version_text": "Debian clang version 19.1.7 (3+b1)\nTarget: aarch64-unknown-linux-gnu\nThread model: posix\nInstalledDir: /usr/lib/llvm-19/bin",
       "error": null
     }
   }
