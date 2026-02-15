@@ -1,0 +1,31 @@
+{
+  "experiment": "1",
+  "target_triple": "aarch64-unknown-linux-gnu",
+  "limits": {
+    "max_ll_bytes": 65536,
+    "max_ll_lines": 2000,
+    "max_basic_blocks": 200,
+    "max_instructions": 20000,
+    "max_alloca_bytes_total": 4096,
+    "timeout_stage_ms": 1000,
+    "timeout_per_test_ms": 50,
+    "max_rss_mib": 64,
+    "max_input_bytes": 65536,
+    "max_output_bytes": 65536
+  },
+  "modes": {
+    "lli_enabled": true,
+    "native_enabled": true,
+    "sanitizer_enabled": false,
+    "fuzz_enabled": false
+  },
+  "determinism": {
+    "clear_env": true,
+    "cwd_mode": "run_dir",
+    "seed_source": "candidate_id"
+  },
+  "logging": {
+    "capture_stdout": true,
+    "capture_stderr": true
+  }
+}

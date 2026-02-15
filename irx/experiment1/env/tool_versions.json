@@ -1,4 +1,41 @@
 {
-  "required_binaries": ["llvm-as", "opt", "lli", "llc", "clang"],
-  "detected": {}
+  "required_binaries": [
+    "llvm-as",
+    "opt",
+    "lli",
+    "llc",
+    "clang"
+  ],
+  "detected": {
+    "llvm-as": {
+      "ok": false,
+      "path": null,
+      "version_text": null,
+      "error": "not found"
+    },
+    "opt": {
+      "ok": false,
+      "path": null,
+      "version_text": null,
+      "error": "not found"
+    },
+    "lli": {
+      "ok": false,
+      "path": null,
+      "version_text": null,
+      "error": "not found"
+    },
+    "llc": {
+      "ok": false,
+      "path": null,
+      "version_text": null,
+      "error": "not found"
+    },
+    "clang": {
+      "ok": true,
+      "path": "/usr/bin/clang",
+      "version_text": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.5.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin",
+      "error": null
+    }
+  }
 }

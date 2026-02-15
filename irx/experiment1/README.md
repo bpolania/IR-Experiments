@@ -19,3 +19,17 @@ Execution logic is intentionally not implemented yet.
 - ABI and limits: `harness/constants.json`
 - Task specs and vectors: `tasks/*/spec.json`, `tasks/*/tests.json`
 - Result shape contract: `harness/result_schema.json`
+
+## Phase 1: Toolchain Discovery and Environment Capture
+
+Phase 1 adds deterministic local toolchain discovery and canonical run-configuration capture.
+This phase verifies binary availability, records paths and versions, and generates frozen run defaults.
+
+Files added/updated in Phase 1:
+- Added: `harness/discover_toolchain.py`
+- Added: `harness/generate_run_config.py`
+- Added: `phase1_check.sh`
+- Added: `env/run_config.default.json` (generated)
+- Updated: `env/tool_versions.json` (`detected` populated by discovery)
+
+Phase 1 does not implement candidate execution, LLVM gates, `lli` runs, `llc` builds, or policy checking.
