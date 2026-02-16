@@ -254,7 +254,7 @@ def _resolve_target_triple(artifacts: dict[str, Any], repo_root: Path) -> tuple[
     source = str(target_path.relative_to(repo_root))
     if not isinstance(target_obj, dict):
         return None, f"llc_missing_target_triple source={source}"
-    triple = target_obj.get("target_triple")
+    triple = target_obj.get("target_triple") or target_obj.get("triple")
     if not isinstance(triple, str) or len(triple.strip()) == 0:
         return None, f"llc_missing_target_triple source={source}"
     return triple, f"target_triple={triple}"
@@ -380,37 +380,178 @@ def _format_harness_not_found_detail(report: dict[str, Any]) -> str:
 
 def _schema_supports_per_test_results(schema: dict[str, Any]) -> tuple[bool, str]:
     inspected_paths = [
-        "$.properties",
-        "$.properties.runs",
-        "$.properties.metrics",
-        "$.properties.gates",
-        "$.$defs",
+        "$.properties.test_results",
+        "$.$defs.testResult",
     ]
     props = schema.get("properties")
     if not isinstance(props, dict):
         return False, "ERR_INTERNAL(-3): schema missing $.properties"
 
-    for _, val in props.items():
-        if not isinstance(val, dict):
-            continue
-        if val.get("type") != "array":
-            continue
-        item = val.get("items")
-        if not isinstance(item, dict):
-            continue
-        if "$ref" in item and item.get("$ref") == "#/$defs/runRecord":
-            continue
-        item_props = item.get("properties")
-        if not isinstance(item_props, dict):
-            continue
-        required = {"test_id", "expected_ret", "expected_out_hex", "actual_ret", "actual_out_hex"}
-        if required.issubset(set(item_props.keys())):
-            return True, "schema has explicit per-test array"
+    defs = schema.get("$defs", {})
+    tr_prop = props.get("test_results")
+    if isinstance(tr_prop, dict) and tr_prop.get("type") == "array":
+        items = tr_prop.get("items", {})
+        ref = items.get("$ref", "")
+        if ref:
+            ref_key = ref.split("/")[-1] if "/" in ref else ""
+            resolved = defs.get(ref_key, {})
+        else:
+            resolved = items
+        resolved_props = resolved.get("properties", {})
+        required = {"index", "expected_ret", "expected_out_hex", "actual_ret", "actual_out_hex"}
+        if required.issubset(set(resolved_props.keys())):
+            return True, "schema has explicit per-test array at $.properties.test_results"
 
     return False, (
         "ERR_INTERNAL(-3): schema has no explicit per-test result container; "
         f"inspected={','.join(inspected_paths)}"
     )
+
+
+def _resolve_harness_path(repo_root: Path) -> tuple[Path | None, Path | None, str]:
+    harness = repo_root / "irx" / "experiment1" / "harness" / "lli_abi_runner.py"
+    shim_bc = repo_root / "irx" / "experiment1" / "harness" / "lli_shim" / "shim.bc"
+    if not harness.is_file():
+        return None, None, f"harness_not_found path={harness.relative_to(repo_root)}"
+    if not shim_bc.is_file():
+        return None, None, f"shim_bc_not_found path={shim_bc.relative_to(repo_root)}"
+    return harness, shim_bc, f"harness={harness.relative_to(repo_root)};shim_bc={shim_bc.relative_to(repo_root)}"
+
+
+def _run_single_lli_test(
+    *,
+    harness_path: Path,
+    lli_path: str,
+    bc_path: Path,
+    in_hex: str,
+    out_cap: int,
+    timeout_ms: int,
+    work_dir: Path,
+    lli_env: dict[str, str],
+) -> dict[str, Any]:
+    cmd = [
+        sys.executable,
+        str(harness_path),
+        "--lli", lli_path,
+        "--bc", str(bc_path),
+        "--in_hex", in_hex if in_hex else "",
+        "--out_cap", str(out_cap),
+        "--timeout_ms", str(timeout_ms),
+        "--workdir", str(work_dir),
+    ]
+    env = dict(lli_env)
+    env["PYTHONIOENCODING"] = "utf-8"
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=(timeout_ms / 1000.0) + 5.0,
+            env=env,
+        )
+        stdout = (proc.stdout or "").strip()
+        if stdout:
+            return json.loads(stdout)
+        return {"ok": False, "exit_code": None, "signal": None, "ret_i64": None, "out_hex": None, "detail": "empty_harness_stdout"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "exit_code": None, "signal": None, "ret_i64": None, "out_hex": None, "detail": f"harness_timeout ms={timeout_ms}"}
+    except (json.JSONDecodeError, Exception) as exc:
+        return {"ok": False, "exit_code": None, "signal": None, "ret_i64": None, "out_hex": None, "detail": f"harness_error {type(exc).__name__}"}
+
+
+def _run_lli_tests(
+    *,
+    harness_path: Path,
+    lli_path: str,
+    bc_path: Path,
+    task_vectors: list[dict[str, Any]],
+    timeout_per_test_ms: int,
+    max_rss_mib: int,
+    work_dir: Path,
+    stage_record: dict[str, Any],
+) -> tuple[bool, str, list[dict[str, Any]], dict[str, int]]:
+    _, lli_env = _build_llvm_tool_env(lli_path)
+    env_for_harness = {"LC_ALL": "C", "LANG": "C", "TZ": "UTC"}
+    if lli_env is not None:
+        env_for_harness["LD_LIBRARY_PATH"] = lli_env
+
+    test_results: list[dict[str, Any]] = []
+    counts = {"passed": 0, "failed": 0, "ret_mismatches": 0, "output_mismatches": 0, "timeouts": 0, "crashes": 0}
+
+    for idx, vec in enumerate(task_vectors):
+        in_hex = vec.get("in_hex", "")
+        out_cap = vec.get("out_cap", 0)
+        expected_ret = vec.get("expected_ret", 0)
+        expected_out_hex = vec.get("expected_out_hex", "")
+
+        result = _run_single_lli_test(
+            harness_path=harness_path,
+            lli_path=lli_path,
+            bc_path=bc_path,
+            in_hex=in_hex,
+            out_cap=out_cap,
+            timeout_ms=timeout_per_test_ms,
+            work_dir=work_dir,
+            lli_env=env_for_harness,
+        )
+
+        actual_ret = result.get("ret_i64")
+        actual_out_hex = result.get("out_hex")
+        sig_name = result.get("signal")
+        exit_code = result.get("exit_code")
+        detail = result.get("detail")
+
+        if not result.get("ok"):
+            if detail and "timeout" in detail.lower():
+                outcome = "TIMEOUT"
+                counts["timeouts"] += 1
+            elif sig_name:
+                outcome = "UNEXPECTED_CRASH"
+                counts["crashes"] += 1
+            else:
+                outcome = "UNEXPECTED_CRASH"
+                counts["crashes"] += 1
+            counts["failed"] += 1
+        else:
+            if actual_ret != expected_ret:
+                outcome = "RETURN_MISMATCH"
+                counts["ret_mismatches"] += 1
+                counts["failed"] += 1
+            elif (actual_out_hex or "") != (expected_out_hex or ""):
+                outcome = "OUTPUT_MISMATCH"
+                counts["output_mismatches"] += 1
+                counts["failed"] += 1
+            else:
+                outcome = "PASS"
+                counts["passed"] += 1
+
+        test_results.append({
+            "index": idx,
+            "in_hex": in_hex,
+            "out_cap": out_cap,
+            "expected_ret": expected_ret,
+            "expected_out_hex": expected_out_hex,
+            "actual_ret": actual_ret,
+            "actual_out_hex": actual_out_hex,
+            "outcome": outcome,
+            "exit_code": exit_code,
+            "signal": sig_name,
+            "detail": (detail or "")[:200] if detail else None,
+        })
+
+    all_pass = counts["failed"] == 0 and len(task_vectors) > 0
+    stage_record["ok"] = all_pass
+    stage_record["exit_code"] = 0 if all_pass else 1
+    stage_record["duration_ms"] = 0
+    stage_record["rss_mib"] = None
+    stage_record["crash"] = None if all_pass else {
+        "type": "POLICY_VIOLATION",
+        "signal": None,
+        "detail": f"lli_tests_failed passed={counts['passed']} failed={counts['failed']} total={len(task_vectors)}",
+    }
+
+    detail_str = f"passed={counts['passed']};failed={counts['failed']};total={len(task_vectors)}"
+    return all_pass, f"LLI_TESTS_{'PASS' if all_pass else 'FAIL'}:{detail_str}", test_results, counts
 
 
 def _count_lines(candidate_bytes: bytes) -> int:
@@ -661,7 +802,7 @@ def _run_opt_verify(
     env, preexec_fn, _ = _prepare_llvm_tool_runtime("opt", opt_path, max_rss_mib)
 
     proc = subprocess.Popen(
-        [opt_path, "-verify", "-disable-output", "candidate.bc"],
+        [opt_path, "-passes=verify", "-disable-output", "candidate.bc"],
         cwd=str(work_dir),
         env=env,
         stdin=subprocess.DEVNULL,
@@ -953,6 +1094,7 @@ def run_step_a(
             )
 
     lli_ok = False
+    test_results_list: list[dict[str, Any]] = []
     tests_total = 0
     tests_passed = 0
     tests_failed = 0
@@ -1005,8 +1147,13 @@ def run_step_a(
                 tests_failed = tests_total
                 crashes = 1
             else:
-                if harness_probe.get("status") != "found":
-                    detail = _format_harness_not_found_detail(harness_probe)
+                harness_path, shim_bc_path, harness_detail = _resolve_harness_path(repo_root)
+                if harness_path is None:
+                    harness_probe = _discover_lli_abi_mechanism(repo_root)
+                    if harness_probe.get("status") != "found":
+                        detail = _format_harness_not_found_detail(harness_probe)
+                    else:
+                        detail = harness_detail
                     runs_skeleton[3]["ok"] = False
                     runs_skeleton[3]["exit_code"] = None
                     runs_skeleton[3]["duration_ms"] = 0
@@ -1037,27 +1184,23 @@ def run_step_a(
                         tests_failed = tests_total
                         crashes = 1
                     else:
-                        mechanism = str(harness_probe.get("chosen_harness"))
-                        detail = (
-                            "ERR_INTERNAL(-3): frozen lli ABI invocation contract is not machine-readable; "
-                            f"chosen_harness={mechanism};required_contract=explicit_cli_or_io_spec"
+                        print(f"[lli] harness={harness_path.relative_to(repo_root)}", file=sys.stderr)
+                        lli_ok, lli_detail, test_results_list, test_counts = _run_lli_tests(
+                            harness_path=harness_path,
+                            lli_path=lli_path,
+                            bc_path=candidate_bc_path,
+                            task_vectors=task_vectors,
+                            timeout_per_test_ms=timeout_per_test_ms,
+                            max_rss_mib=max_rss_mib_tests,
+                            work_dir=work_dir,
+                            stage_record=runs_skeleton[3],
                         )
-                        runs_skeleton[3]["ok"] = False
-                        runs_skeleton[3]["exit_code"] = None
-                        runs_skeleton[3]["duration_ms"] = 0
-                        runs_skeleton[3]["rss_mib"] = None
-                        runs_skeleton[3]["crash"] = {
-                            "type": "POLICY_VIOLATION",
-                            "signal": None,
-                            "detail": detail,
-                        }
-                        lli_ok = False
-                        lli_detail = (
-                            f"LLI_TESTS_FAIL:{detail};timeout_per_test_ms={timeout_per_test_ms};"
-                            f"max_rss_mib={max_rss_mib_tests}"
-                        )
-                        tests_failed = tests_total
-                        crashes = 1
+                        tests_passed = test_counts["passed"]
+                        tests_failed = test_counts["failed"]
+                        ret_mismatches = test_counts["ret_mismatches"]
+                        output_mismatches = test_counts["output_mismatches"]
+                        timeouts = test_counts["timeouts"]
+                        crashes = test_counts["crashes"]
 
     probe_detail = ""
     if harness_probe is not None:
@@ -1161,6 +1304,7 @@ def run_step_a(
             "timeouts": timeouts,
             "crashes": crashes,
         },
+        "test_results": test_results_list,
         "verdict": "ERROR",
     }
 
