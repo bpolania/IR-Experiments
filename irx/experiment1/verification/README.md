@@ -26,3 +26,10 @@ python3 runner/phase2/phase2_runner.py \
 - **llc_compile**: Runs only when `lli_tests.ok=true`. A correct `sum_u32_le`
   implementation is required to exercise Step F end-to-end.
 - **clang_link, native_tests**: Not yet wired in the runner.
+
+## Step F Evidence
+
+`evidence/step_f_check.sh` reproduces the full A-F pipeline run with the
+known-good candidate and prints a summary (IDs, stage results, tests passed,
+candidate.o size). See `evidence/STEP_F_EVIDENCE.md` for expected values and
+PASS conditions.
