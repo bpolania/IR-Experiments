@@ -1,0 +1,32 @@
+=== Step H Evidence Check ===
+repo: /home/bpolania/documents/github/IR-Experiments
+py_compile: OK
+runner exit: 0
+[llvm-as] LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[opt] LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[lli] harness=irx/experiment1/harness/lli_abi_runner.py
+[llc] LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[clang] LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[native_harness] CACHED selftest=PASS path=irx/experiment1/harness/native/native_runner
+
+--- Summary ---
+candidate_id: de499765dfe2e94002b34a27d113273ffe5c4345c6463f665f87cc5b2fb610b6
+run_id:       4254c62717bfc6fbabf0ca1cf107b9519e030649890ea8b3d8acf9c9367f5d60
+
+  precheck             ok=True   not_run
+  llvm_as_parse        ok=True   exit=0
+  opt_verify           ok=True   exit=0
+  lli_tests            ok=True   exit=0
+  llc_compile          ok=True   exit=0
+  clang_link           ok=True   exit=0
+  native_tests         ok=True   exit=0
+
+lli tests:    10/10 passed, 0 failed
+native tests: 10/10 passed, 0 failed
+
+candidate.o:   EXISTS (1008 bytes)
+candidate.exe: EXISTS (2304 bytes)
+
+lli/native match: ALL 10 tests agree
+
+=== Done ===

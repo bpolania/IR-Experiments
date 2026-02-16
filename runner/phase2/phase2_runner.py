@@ -70,6 +70,55 @@ def _build_runs_skeleton() -> list[dict[str, Any]]:
     ]
 
 
+def compute_verdict(
+    runs: list[dict[str, Any]],
+    metrics: dict[str, Any],
+    gates: dict[str, Any],
+) -> tuple[str, str]:
+    """Derive verdict from stage outcomes, test metrics, and gates.
+
+    Returns (verdict_str, detail_str) where verdict_str is one of
+    "PASS", "FAIL", or "ERROR".
+    """
+    # Identify stages that actually executed (not NOT_RUN).
+    executed = [
+        r for r in runs
+        if r["exit_code"] is not None
+        or r["duration_ms"] > 0
+        or r["crash"] is not None
+    ]
+
+    # Any executed stage with ok=False -> FAIL.
+    for r in executed:
+        if not r["ok"]:
+            return ("FAIL", "STAGE_FAILED:" + r["stage"])
+
+    # Check lli test failures.
+    lli_failed = metrics.get("tests_failed")
+    if lli_failed is not None and lli_failed > 0:
+        return ("FAIL", "LLI_TESTS_FAILED")
+
+    # Check native test failures.
+    native_failed = metrics.get("native_tests_failed")
+    if native_failed is not None and native_failed > 0:
+        return ("FAIL", "NATIVE_TESTS_FAILED")
+
+    # No stages executed at all.
+    if not executed:
+        return ("ERROR", "NO_STAGES_EXECUTED")
+
+    # All executed stages ok, no test failures -> check that every stage
+    # in the skeleton is accounted for (all ok=True).
+    all_ok = all(r["ok"] for r in runs)
+    tests_failed_zero = (lli_failed is None or lli_failed == 0)
+    native_failed_zero = (native_failed is None or native_failed == 0)
+
+    if all_ok and tests_failed_zero and native_failed_zero:
+        return ("PASS", "ALL_STAGES_PASS")
+
+    return ("ERROR", "INDETERMINATE_VERDICT")
+
+
 def _load_precheck_limits(artifacts: dict[str, Any], repo_root: Path) -> tuple[int, int]:
     constants_path = artifacts["constants_path"]
     constants = artifacts["constants"]
@@ -1794,6 +1843,48 @@ def run_step_a(
                         native_timeouts = native_counts["timeouts"]
                         native_crashes = native_counts["crashes"]
 
+    # -- Build preliminary metrics and gates for verdict computation. --
+    metrics_obj: dict[str, Any] = {
+        "tests_total": tests_total,
+        "tests_passed": tests_passed,
+        "tests_failed": tests_failed,
+        "ret_mismatches": ret_mismatches,
+        "output_mismatches": output_mismatches,
+        "timeouts": timeouts,
+        "crashes": crashes,
+        "native_tests_total": native_tests_total,
+        "native_tests_passed": native_tests_passed,
+        "native_tests_failed": native_tests_failed,
+        "native_ret_mismatches": native_ret_mismatches,
+        "native_output_mismatches": native_output_mismatches,
+        "native_timeouts": native_timeouts,
+        "native_crashes": native_crashes,
+    }
+
+    policy_base_detail = loaded_artifacts_detail + ";" + llc_detail + ";" + clang_detail + ";" + native_detail
+    gates_obj: dict[str, Any] = {
+        "parse": {
+            "ok": llvm_as_ok,
+            "detail": loaded_artifacts_detail + ";" + precheck_detail + ";" + llvm_as_detail,
+        },
+        "verify": {
+            "ok": opt_ok,
+            "detail": loaded_artifacts_detail + ";" + opt_detail,
+        },
+        "policy": {
+            "ok": False,
+            "detail": policy_base_detail,
+        },
+        "tests": {
+            "ok": lli_ok,
+            "detail": loaded_artifacts_detail + ";" + lli_detail + probe_detail,
+        },
+    }
+
+    verdict_str, verdict_detail = compute_verdict(runs_skeleton, metrics_obj, gates_obj)
+    gates_obj["policy"]["ok"] = verdict_str == "PASS"
+    gates_obj["policy"]["detail"] = policy_base_detail + ";verdict=" + verdict_detail
+
     result_obj: dict[str, Any] = {
         "experiment": str(artifacts["constants"].get("experiment", "1")),
         "task": task,
@@ -1803,44 +1894,12 @@ def run_step_a(
             "started_at": started,
             "finished_at": finished,
         },
-        "gates": {
-            "parse": {
-                "ok": llvm_as_ok,
-                "detail": loaded_artifacts_detail + ";" + precheck_detail + ";" + llvm_as_detail,
-            },
-            "verify": {
-                "ok": opt_ok,
-                "detail": loaded_artifacts_detail + ";" + opt_detail,
-            },
-            "policy": {
-                "ok": False,
-                "detail": loaded_artifacts_detail + ";" + llc_detail + ";" + clang_detail + ";" + native_detail,
-            },
-            "tests": {
-                "ok": lli_ok,
-                "detail": loaded_artifacts_detail + ";" + lli_detail + probe_detail,
-            },
-        },
+        "gates": gates_obj,
         "runs": runs_skeleton,
-        "metrics": {
-            "tests_total": tests_total,
-            "tests_passed": tests_passed,
-            "tests_failed": tests_failed,
-            "ret_mismatches": ret_mismatches,
-            "output_mismatches": output_mismatches,
-            "timeouts": timeouts,
-            "crashes": crashes,
-            "native_tests_total": native_tests_total,
-            "native_tests_passed": native_tests_passed,
-            "native_tests_failed": native_tests_failed,
-            "native_ret_mismatches": native_ret_mismatches,
-            "native_output_mismatches": native_output_mismatches,
-            "native_timeouts": native_timeouts,
-            "native_crashes": native_crashes,
-        },
+        "metrics": metrics_obj,
         "test_results": test_results_list,
         "native_test_results": native_test_results_list,
-        "verdict": "ERROR",
+        "verdict": verdict_str,
     }
 
     validate_json_schema_instance(result_obj, artifacts["result_schema"])
