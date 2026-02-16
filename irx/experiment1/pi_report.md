@@ -22,11 +22,12 @@ deterministic and reproducible.
 | `f0a6261` | 2026-02-15 22:28 | Add Step F evidence bundle and `step_f_check.sh` |
 | `b0d8cd9` | 2026-02-15 23:02 | Implement Step G `clang_link` (freestanding ELF linking) |
 | `a5d84da` | 2026-02-15 23:32 | Implement Step H `native_tests`, extend result schema with native metrics |
-| `5201dd2` | 2026-02-15 23:41 | Add `PHASE2_CLOSURE.md` and `step_h_check_20260215_234036.log` |
+| `5201dd2` | 2026-02-15 23:41 | Add `PHASE2_CLOSURE.md` and `step_h_check_20260215_234036.log` (`git show --name-status 5201dd2`: A irx/experiment1/PHASE2_CLOSURE.md, A irx/experiment1/verification/evidence/logs/step_h_check_20260215_234036.log) |
 | `8762240` | 2026-02-15 23:55 | Fix verdict computation from stage outcomes (`compute_verdict()`) |
 | `b104ff5` | 2026-02-16 00:48 | Documentation accuracy pass (stage lettering, native loader description) |
 | `d6ebc56` | 2026-02-16 01:02 | Fix milestone attribution, correct evidence log HEAD values |
 | `5f55ce6` | 2026-02-16 01:19 | Fix ABI return type documentation (`i32` to `i64`), add `LOADED_STEP_A` example |
+| *(this commit)* | 2026-02-16 | Fix stale `i32` in `constants.json` and 3 `spec.json` files, add `5201dd2` git-proof, resolve ABI discrepancy |
 
 ---
 
@@ -257,12 +258,9 @@ across every executable component:
 | Native harness typedef | `harness/native/native_runner.c` | 32 | `typedef int64_t (*candidate_fn)(uint8_t *, int32_t, uint8_t *, int32_t)` |
 | Known-good candidate | `verification/step_f/sum_u32_le_good.ll` | 4 | `define i64 @f(ptr %in_ptr, i32 %in_len, ptr %out_ptr, i32 %out_cap)` |
 
-**Known discrepancy.** The `signature_ir` field inside `constants.json` and
-the three `tasks/*/spec.json` files contains a stale `i32` return type from
-an earlier draft (`"i32 @f(i8* %in_ptr, i32 %in_len, i8* %out_ptr, i32 %out_cap)"`).
-The runner never reads this field — it is purely documentary. No runtime
-behavior is affected. The authoritative return type is `i64`, as proven by
-the five locations above.
+The `signature_ir` field in `constants.json` and all three `tasks/*/spec.json`
+files matches the authoritative `i64` return type. (These fields were corrected
+from a stale `i32` draft; see revision history.)
 
 #### 4.3.2 Error Codes
 
@@ -885,12 +883,13 @@ did not yet exist.
 mtime 00:05:05 PST. Last committed HEAD: `b00ab95` (00:00:28). Next commit
 `ef34058` at 00:17:03. Previous reports listed "post-`8762240`", imprecise.
 
-### 15.2 ABI Discrepancy
+### 15.2 ABI Consistency (Resolved)
 
 The `signature_ir` field in `constants.json` and all three `spec.json` files
-contains `i32 @f(...)`. Every executable artifact uses `i64 @f(...)`. The
-runner never reads `signature_ir`. No runtime impact. The stale field should
-be updated in a future housekeeping commit, but this is cosmetic.
+previously contained a stale `i32` return type from an earlier draft. This was
+corrected to `i64` to match the authoritative ABI used by every executable
+component (see Section 4.3.1). The runner never reads `signature_ir`, so no
+runtime behavior was affected — the fix is purely documentary consistency.
 
 ---
 
@@ -935,4 +934,4 @@ candidate.exe 2304 B.
 
 ---
 
-*Report generated 2026-02-16 on Raspberry Pi 5. Latest commit at time of writing: `5f55ce6`.*
+*Report updated 2026-02-16 on Raspberry Pi 5. ABI discrepancy resolved: all `signature_ir` fields now read `i64`.*

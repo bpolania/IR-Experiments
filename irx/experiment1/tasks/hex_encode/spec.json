@@ -2,7 +2,7 @@
   "task_name": "hex_encode",
   "abi": {
     "function": "f",
-    "signature_ir": "i32 @f(i8* %in_ptr, i32 %in_len, i8* %out_ptr, i32 %out_cap)"
+    "signature_ir": "i64 @f(i8* %in_ptr, i32 %in_len, i8* %out_ptr, i32 %out_cap)"
   },
   "return_semantics": "Returns bytes written on success; negative error code on failure.",
   "memory_rules": {
