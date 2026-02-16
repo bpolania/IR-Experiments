@@ -4,297 +4,222 @@
 **OS**: Raspberry Pi OS 64-bit (Debian-based), kernel 6.12.47+rpt-rpi-2712
 **LLVM**: Debian LLVM 19.1.7 (Optimized build)
 **Target triple**: `aarch64-unknown-linux-gnu`
-**Phase 2 closure**: 2026-02-15, HEAD `5201dd2`
-**Current HEAD**: `8762240` (verdict fix)
+**Phase 2 closure**: 2026-02-15 (HEAD `5201dd2`)
+**Verdict fix**: 2026-02-15 (HEAD `8762240`)
+**Latest evidence run**: 2026-02-16 00:05 PST (HEAD `b00ab95`)
 
 ---
 
-## 1 Executive Summary
+## 1 Purpose
 
-This report is the definitive record for Experiment 1, Phase 2 on Raspberry
-Pi 5. It traces the project from a runner that could not even load the LLVM
-shared library to a fully closed pipeline where interpreted and natively
-compiled test results agree bitwise, and where the JSON artifact correctly
-records `"verdict": "PASS"` when all stages succeed.
-
-Ten milestones brought the pipeline to its current state:
-
-1. **Environment fix** — llvm-as failed because the cleared subprocess
-   lacked `LD_LIBRARY_PATH` and applied `RLIMIT_AS` at 64 MiB, far below
-   what the 123 MB `libLLVM.so.19.1` requires for memory mapping. Fixed
-   with deterministic library path derivation and RSS-only limiting.
-
-2. **Re-verification** — Confirmed llvm-as and opt could execute, bitcode
-   was produced, and runs were deterministic. opt_verify still failed
-   (cause not yet identified).
-
-3. **Full sweep** — Diagnosed and patched four gaps: opt's legacy `-verify`
-   syntax (LLVM 19 requires `-passes=verify`), target triple key mismatch,
-   broken `$ref` resolution in schema per-test detection, and a hardcoded
-   lli_tests failure block. Steps A-E verified PASS.
-
-4. **Authority revision** — A known-good candidate exposed a byte-order
-   error in test vector t08. The expected value `"fffffffe"` was big-endian
-   notation; the correct little-endian encoding is `"feffffff"`.
-   Single-field correction applied.
-
-5. **Step F evidence** — 10/10 lli_tests pass, llc_compile produces
-   `candidate.o` (1 008 bytes, aarch64 ELF relocatable). Evidence bundle
-   committed.
-
-6. **Step G (clang_link)** — Links `candidate.o` into a freestanding ELF
-   `candidate.exe` (2 304 bytes) using clang with LLD. Uses `-nostdlib
-   -fuse-ld=lld -Wl,--no-dynamic-linker -Wl,-e,f` because the candidate
-   exports only `@f` (no `main`, no `_start`).
-
-7. **Step H (native_tests)** — A 421-line C harness loads the freestanding
-   ELF in-process with a custom ELF64 loader, finds `f` in `.symtab`, and
-   calls it with frozen test vectors. All 10 native tests pass with
-   bitwise-identical results to lli. Schema extended with native fields.
-
-8. **Phase 2 closure** — Clean re-run from cleared artifacts. All seven
-   stages PASS, lli/native match ALL 10 vectors. Schema extension
-   independently verified as committed. Closure record written.
-
-9. **Verdict fix** — The JSON artifact previously hardcoded
-   `"verdict": "ERROR"` because verdict was derived from `gates.policy.ok`
-   which was always `False`. Replaced with `compute_verdict()`, a pure
-   function that derives the verdict from actual stage outcomes and test
-   metrics. The artifact now correctly records `"PASS"` when all stages
-   succeed, `"FAIL"` when any stage or test fails, and `"ERROR"` when no
-   stages execute.
-
-**Final status**: Phase 2 complete. All seven stages PASS. Verdict is
-`"PASS"`. Interpreter and native execution agree across all 10 test vectors.
+This document is the single long-form record for Experiment 1, Phase 2
+on Raspberry Pi 5. It traces the project from its first failed run
+through Phase 2 closure and a subsequent correctness fix to the verdict
+field. The latest clean evidence run confirms that the pipeline produces
+a schema-valid JSON artifact recording `"verdict": "PASS"` when every
+stage succeeds.
 
 ---
 
-## 2 Pipeline Architecture
+## 2 Timeline
 
-### 2.1 Overview
+| Gen | Milestone | Key change | Commit |
+|-----|-----------|------------|--------|
+| 1 | Environment fix | `LD_LIBRARY_PATH` derivation, RSS-only limits | `6b5a37f` |
+| 2 | Re-verification | Confirmed llvm-as/opt, determinism | `d5298ad` |
+| 3 | Full sweep | opt syntax, triple key, schema `$ref`, lli harness | `b1679b0` |
+| 4 | Authority revision | t08 `expected_out_hex` corrected to LE | `31223ce` |
+| 5 | Step F evidence | llc_compile produces `candidate.o` | `f0a6261` |
+| 6 | Step G | clang_link produces `candidate.exe` | `b0d8cd9` |
+| 7 | Step H | native_tests: custom ELF loader, 10/10 pass | `a5d84da` |
+| 8 | Phase 2 closure | Clean re-run, closure record | `5201dd2` |
+| 9 | Verdict fix | `compute_verdict()` replaces hardcoded `"ERROR"` | `8762240` |
+| 10 | Final evidence | Preflight + full A-H + verdict proof | `b00ab95` |
 
-The Phase 2 runner (`runner/phase2/phase2_runner.py`) accepts a `.ll`
-candidate, derives deterministic SHA-256 IDs, then executes seven stages in
-a fixed sequence. Each stage gates on all prior stages passing. Results are
-recorded in a schema-validated JSON artifact under
-`irx/experiment1/runs/<candidate_id>/<run_id>.json`.
+---
 
-### 2.2 Stage Sequence
+## 3 Pipeline
 
-| Index | Stage | Tool | Precondition |
-|-------|-------|------|--------------|
+### 3.1 Stages
+
+| # | Stage | Tool | Gate |
+|---|-------|------|------|
 | 0 | `precheck` | static analysis | — |
 | 1 | `llvm_as_parse` | `llvm-as` | precheck.ok |
-| 2 | `opt_verify` | `opt -passes=verify` | llvm_as_parse.ok, candidate.bc exists |
-| 3 | `lli_tests` | `lli` + shim harness | opt_verify.ok, harness resolved |
-| 4 | `llc_compile` | `llc -filetype=obj` | lli_tests.ok, candidate.bc exists |
-| 5 | `clang_link` | `clang` + LLD | llc_compile.ok, candidate.o exists |
-| 6 | `native_tests` | native harness | clang_link.ok, candidate.exe exists |
+| 2 | `opt_verify` | `opt -passes=verify` | parse.ok, .bc exists |
+| 3 | `lli_tests` | `lli` + shim | verify.ok, harness resolved |
+| 4 | `llc_compile` | `llc -filetype=obj` | lli.ok, .bc exists |
+| 5 | `clang_link` | `clang` + LLD | llc.ok, .o exists |
+| 6 | `native_tests` | native harness | clang.ok, .exe exists |
 
-All LLVM tools are at `/usr/lib/llvm-19/bin/`.
+All LLVM tools at `/usr/lib/llvm-19/bin/`. Each stage gates on every
+prior stage passing; failure propagates NOT_RUN downstream.
 
-### 2.3 ID Derivation
+### 3.2 Subprocess Environment
 
-Frozen rules in `harness/id_rules.json`:
+LLVM tools: `LC_ALL=C LANG=C TZ=UTC LD_LIBRARY_PATH=/usr/lib/llvm-19/lib`
+(derived from `parent.parent / lib` of frozen tool path).
 
-- `candidate_id = sha256(candidate.ll file bytes).hexdigest()`
-- `run_id = sha256(candidate_id as UTF-8 string).hexdigest()`
+clang_link adds `-fuse-ld=lld` (env has no `PATH`; clang spawns a child
+linker).
 
-### 2.4 Subprocess Environment
+native_tests: `LC_ALL=C LANG=C TZ=UTC` only (harness depends on libc
+alone).
 
-LLVM tool subprocesses run with a cleared environment:
+### 3.3 Resource Limits
 
-```
-LC_ALL=C  LANG=C  TZ=UTC  LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
-```
+`RLIMIT_RSS` at 64 MiB. `RLIMIT_AS` not applied (`libLLVM.so.19.1` is
+123 MB and must be memory-mapped).
 
-`LD_LIBRARY_PATH` derived deterministically from the frozen tool path
-(`parent.parent / lib`). No host variables consulted.
-
-The `clang_link` stage adds `-fuse-ld=lld` so clang finds its colocated
-LLD linker without `PATH`.
-
-The `native_tests` stage uses three variables only (`LC_ALL=C`, `LANG=C`,
-`TZ=UTC`) — no `LD_LIBRARY_PATH` needed since the harness depends only on
-libc.
-
-### 2.5 Resource Limits
-
-`RLIMIT_RSS` applied at 64 MiB. `RLIMIT_AS` intentionally not applied
-because `libLLVM.so.19.1` (123 MB) requires virtual memory well beyond
-64 MiB for its mappings.
-
-### 2.6 Verdict Computation
-
-The `compute_verdict(runs, metrics, gates)` function derives the verdict
-from actual stage outcomes:
+### 3.4 ID Derivation
 
 ```
-executed = stages where exit_code is not None, duration_ms > 0, or crash is not None
-
-if any executed stage has ok=False     -> ("FAIL", "STAGE_FAILED:<stage>")
-if metrics.tests_failed > 0           -> ("FAIL", "LLI_TESTS_FAILED")
-if metrics.native_tests_failed > 0    -> ("FAIL", "NATIVE_TESTS_FAILED")
-if no stages executed                  -> ("ERROR", "NO_STAGES_EXECUTED")
-if all runs ok and zero test failures  -> ("PASS", "ALL_STAGES_PASS")
-otherwise                              -> ("ERROR", "INDETERMINATE_VERDICT")
+candidate_id = sha256(file bytes of candidate.ll)
+run_id       = sha256(candidate_id as UTF-8 string)
 ```
 
-The verdict detail string is appended to `gates.policy.detail` (schema is
-`additionalProperties: false` at top level, so no new keys can be added).
-`gates.policy.ok` is set to `True` when verdict is `"PASS"`.
+Frozen in `harness/id_rules.json`.
+
+### 3.5 Verdict Computation
+
+`compute_verdict(runs, metrics, gates)` derives the verdict from actual
+stage outcomes:
+
+| Condition | Verdict | Detail |
+|-----------|---------|--------|
+| Any executed stage `ok=False` | FAIL | `STAGE_FAILED:<name>` |
+| `tests_failed > 0` | FAIL | `LLI_TESTS_FAILED` |
+| `native_tests_failed > 0` | FAIL | `NATIVE_TESTS_FAILED` |
+| No stages executed | ERROR | `NO_STAGES_EXECUTED` |
+| All stages ok, zero failures | PASS | `ALL_STAGES_PASS` |
+| Otherwise | ERROR | `INDETERMINATE_VERDICT` |
+
+Detail is appended to `gates.policy.detail` as `;verdict=<detail>`.
+`gates.policy.ok` is `True` when verdict is PASS.
 
 ---
 
-## 3 Frozen Artifact Inventory
+## 4 Frozen Artifacts
 
-### 3.1 Tool Versions (`env/tool_versions.json`)
+### 4.1 Tools (`env/tool_versions.json`)
 
-| Tool | Frozen Path | Version |
-|------|-------------|---------|
+| Tool | Path | Version |
+|------|------|---------|
 | llvm-as | `/usr/lib/llvm-19/bin/llvm-as` | 19.1.7 |
 | opt | `/usr/lib/llvm-19/bin/opt` | 19.1.7 |
 | lli | `/usr/lib/llvm-19/bin/lli` | 19.1.7 |
 | llc | `/usr/lib/llvm-19/bin/llc` | 19.1.7 |
 | clang | `/usr/lib/llvm-19/bin/clang` | 19.1.7 (Debian) |
 
-All present, executable, owned by root. `opt` and `llc` entries include host
-CPU `cortex-a76` and target triple confirmation.
+### 4.2 Limits (`harness/constants.json`)
 
-### 3.2 Limits (`harness/constants.json`)
-
-| Limit | Value | Enforced at |
-|-------|-------|-------------|
+| Limit | Value | Where |
+|-------|-------|-------|
 | `max_ll_bytes` | 65 536 | precheck |
 | `max_ll_lines` | 2 000 | precheck |
-| `max_basic_blocks` | 200 | reserved |
-| `max_instructions` | 20 000 | reserved |
-| `max_alloca_bytes_total` | 4 096 | reserved |
 | `timeout_stage_ms` | 1 000 | llvm_as, opt, llc, clang |
 | `timeout_per_test_ms` | 50 | lli_tests, native_tests |
-| `max_rss_mib` | 64 | all tool stages |
-| `max_input_bytes` | 65 536 | reserved |
-| `max_output_bytes` | 65 536 | reserved |
+| `max_rss_mib` | 64 | all stages |
 
 Error codes: `ERR_INVALID_INPUT` (-1), `ERR_OUTPUT_TOO_SMALL` (-2),
 `ERR_INTERNAL` (-3).
 
-### 3.3 Target (`env/target.json`)
+### 4.3 Target (`env/target.json`)
 
 ```json
 {"os": "raspios64", "arch": "aarch64", "triple": "aarch64-unknown-linux-gnu", "endian": "little"}
 ```
 
-Key is `triple`, not `target_triple`. Runner accepts both.
+### 4.4 Schema (`harness/result_schema.json`)
 
-### 3.4 ID Rules (`harness/id_rules.json`)
+Top-level `additionalProperties: false`. Required keys: `experiment`,
+`task`, `candidate_id`, `run_id`, `timestamps`, `gates`, `runs`,
+`metrics`, `verdict`. Optional: `test_results`, `native_test_results`.
 
-```json
-{
-  "candidate_id": {"algo": "sha256_file_bytes", "input": "candidate.ll"},
-  "run_id": {"algo": "sha256_utf8", "input": "candidate_id"}
-}
+`verdict` enum: `"PASS"`, `"FAIL"`, `"ERROR"`.
+
+`metrics` carries seven required lli counters and seven optional native
+counters (added in `a5d84da`).
+
+### 4.5 ABI
+
+```
+i64 @f(ptr %in_ptr, i32 %in_len, ptr %out_ptr, i32 %out_cap)
 ```
 
-### 3.5 Result Schema (`harness/result_schema.json`)
-
-Required top-level keys: `experiment`, `task`, `candidate_id`, `run_id`,
-`timestamps`, `gates`, `runs`, `metrics`, `verdict`.
-
-Optional arrays: `test_results` (lli) and `native_test_results` (native),
-both of `$defs.testResult` objects with 11 required fields.
-
-The `metrics` object carries seven required lli counters and seven optional
-native counters. The schema uses `additionalProperties: false` throughout,
-so the native fields required explicit addition (commit `a5d84da`). The
-`verdict` field is an enum: `"PASS"`, `"FAIL"`, or `"ERROR"`.
-
-### 3.6 ABI Harness (lli)
-
-- Entrypoint: `harness/lli_abi_runner.py`
-- Shim: `harness/lli_shim/shim.bc`
-- Candidate ABI: `i64 @f(ptr %in_ptr, i32 %in_len, ptr %out_ptr, i32 %out_cap)`
-- Protocol: `RET=<i64>` and `OUT=<hex>` on stdout
-
-### 3.7 Native Harness
-
-- Source: `harness/native/native_runner.c` (421 lines)
-- Binary: `harness/native/native_runner` (13 064 bytes, built by runner)
-- Protocol: identical to lli shim
-- Dependencies: libc only
-
-### 3.8 Test Vectors
-
-| Task | File | Vectors |
-|------|------|---------|
-| sum_u32_le | `tasks/sum_u32_le/tests.json` | 10 |
-| hex_encode | `tasks/hex_encode/tests.json` | present |
-| parse_u32_decimal | `tasks/parse_u32_decimal/tests.json` | present |
+lli harness: `harness/lli_abi_runner.py` + `harness/lli_shim/shim.bc`.
+Native harness: `harness/native/native_runner.c` (421 lines, libc only).
+Both emit `RET=<i64>` / `OUT=<hex>` on stdout.
 
 ---
 
-## 4 Generation 1: Environment Fix
+## 5 Generation 1: Environment Fix
 
-### 4.1 Failure
+llvm-as failed at runtime:
 
 ```
-rc=127; stderr: error while loading shared libraries: libLLVM.so.19.1:
+rc=127; error while loading shared libraries: libLLVM.so.19.1:
 failed to map segment from shared object
 ```
 
-Root causes: (1) no `LD_LIBRARY_PATH` in cleared subprocess, (2) `RLIMIT_AS`
-at 64 MiB too low for the 123 MB library.
+Causes: (1) no `LD_LIBRARY_PATH` in cleared env, (2) `RLIMIT_AS` at
+64 MiB, too low for the 123 MB library.
 
-### 4.2 Fix
-
-- `_derive_llvm_lib_path` / `_build_llvm_tool_env` — deterministic
-  `LD_LIBRARY_PATH` from `parent.parent / lib`
-- `_build_llvm_tool_preexec` — `RLIMIT_RSS` only, not `RLIMIT_AS`
+Fix: `_derive_llvm_lib_path` derives `LD_LIBRARY_PATH` from
+`parent.parent / lib`. `_build_llvm_tool_preexec` applies `RLIMIT_RSS`
+only.
 
 ---
 
-## 5 Generation 2: Re-verification
+## 6 Generation 2: Re-verification
 
-All checks passed: `py_compile`, tool paths, precheck, llvm_as_parse,
-candidate.bc production, determinism. opt_verify failed (cause identified
-later).
-
----
-
-## 6 Generation 3: Full Sweep
-
-### 6.1 Four Gaps
-
-1. `opt -verify` — legacy syntax, LLVM 19 requires `-passes=verify`
-2. `target_triple` key — frozen file uses `triple`
-3. Schema `$ref` resolution — checked `test_id` instead of `index`
-4. lli_tests — hardcoded failure block prevented harness invocation
-
-### 6.2 Patches
-
-All four to `phase2_runner.py` only. Steps A-E verified PASS. Stub
-candidate correctly fails 10/10 tests, gating downstream.
+Confirmed: py_compile OK, tool paths present, precheck pass,
+llvm_as_parse exit=0, `candidate.bc` produced (1 388 bytes), determinism
+verified (`IDS_MATCH=True`, `MASKED_JSON_EQUAL=True`). opt_verify failed
+(cause identified in Generation 3).
 
 ---
 
-## 7 Generation 4: Authority Revision — t08 Byte Order
+## 7 Generation 3: Full Sweep
 
-For input `ffffffffffffffff`:
+Four gaps found and patched (all in `phase2_runner.py`, no frozen
+artifacts changed):
+
+1. **opt syntax**: `opt -verify` → `opt -passes=verify` (LLVM 19 new
+   pass manager)
+2. **Triple key**: `target_triple` → accept both `target_triple` and
+   `triple`
+3. **Schema detection**: Resolve `$ref`, check `index` not `test_id`
+4. **lli harness**: Replace hardcoded failure with actual harness
+   invocation (`_run_lli_tests`)
+
+Post-patch: Steps A-E PASS. Stub candidate correctly fails 10/10
+(RETURN_MISMATCH), gating downstream.
+
+---
+
+## 8 Generation 4: t08 Byte Order
+
+Known-good `sum_u32_le` candidate scored 9/10. Sole failure at t08:
 
 ```
-0xFFFFFFFF + 0xFFFFFFFF = 0xFFFFFFFE (mod 2^32)
-LE bytes: [FE, FF, FF, FF] -> "feffffff"
+expected: "fffffffe"  (BE notation of 0xFFFFFFFE)
+actual:   "feffffff"  (LE byte encoding)
 ```
 
-Original expected `"fffffffe"` was big-endian. All other vectors used LE.
-Single-field correction in `tests.json` (commit `31223ce`).
+Every other vector used LE encoding. Single-field correction in
+`tests.json` (commit `31223ce`).
+
+Proof: `0xFFFFFFFF + 0xFFFFFFFF = 0xFFFFFFFE mod 2^32`. LE store:
+`[FE, FF, FF, FF]` → `"feffffff"`.
 
 ---
 
-## 8 Generation 5: Step F — llc_compile
+## 9 Generation 5: Step F — llc_compile
 
-Known-good candidate `sum_u32_le_good.ll` (42 lines, 1 232 bytes) achieved
-10/10 lli_tests. llc produced `candidate.o` (1 008 bytes).
+Known-good candidate (`verification/step_f/sum_u32_le_good.ll`, 42 lines,
+1 232 bytes) achieved 10/10 lli pass. llc produced `candidate.o`
+(1 008 bytes, aarch64 ELF relocatable):
 
 ```
 llc -filetype=obj -mtriple=aarch64-unknown-linux-gnu -O0 -o candidate.o candidate.bc
@@ -302,114 +227,92 @@ llc -filetype=obj -mtriple=aarch64-unknown-linux-gnu -O0 -o candidate.o candidat
 
 ---
 
-## 9 Generation 6: Step G — clang_link
+## 10 Generation 6: Step G — clang_link
 
-### 9.1 Challenge
+The candidate exports only `@f` (no `main`, no `_start`). Bare
+`clang -o candidate.exe candidate.o` fails (undefined `_start`).
 
-Candidate exports only `@f`. A bare `clang -o` fails: no `_start`.
-
-### 9.2 Solution
+Solution:
 
 ```
 clang -target aarch64-unknown-linux-gnu -fuse-ld=lld -nostdlib \
       -Wl,--no-dynamic-linker -Wl,-e,f -o candidate.exe candidate.o
 ```
 
-`-fuse-ld=lld` required because the deterministic environment has no `PATH`.
-Clang spawns a child linker and needs to find it — with this flag it uses
-its colocated `ld.lld`.
-
-### 9.3 Result
-
-`candidate.exe` produced (2 304 bytes), minimal freestanding ELF with `f`
-as entry point.
+`-fuse-ld=lld` required because the env has no `PATH` — clang needs to
+find its colocated `ld.lld`. Output: `candidate.exe` (2 304 bytes),
+freestanding ELF with `f` as entry point.
 
 ---
 
-## 10 Generation 7: Step H — native_tests
+## 11 Generation 7: Step H — native_tests
 
-### 10.1 Challenge
+### 11.1 Problem
 
-`dlopen`/`dlsym` cannot work: `f` is in `.symtab` only, not `.dynsym`.
-A custom ELF loader was required.
+`dlopen`/`dlsym` cannot work: `f` is in `.symtab` only (`.dynsym` has
+only the null entry).
 
-### 10.2 Native Harness (`native_runner.c`)
+### 11.2 Native Harness
 
-421-line C program:
+`native_runner.c` (421 lines) implements a minimal ELF64 loader:
 
-1. Memory-maps the ELF read-only for header parsing
-2. Validates: ELF64, LSB, aarch64, no relocations
-3. Accepts both `ET_EXEC` and `ET_DYN` (PIE) types
-4. Computes `PT_LOAD` extent, reserves anonymous memory, copies segments
-5. `__builtin___clear_cache` — aarch64 has non-coherent I/D caches; newly
-   loaded code must be flushed to the instruction fetch unit
-6. `mprotect` per-segment from `p_flags`
-7. Symbol lookup in `.symtab` via linked string table; entry point fallback
-8. Casts to `int64_t (*)(uint8_t*, int32_t, uint8_t*, int32_t)`, calls,
-   prints `RET=`/`OUT=`
+- Validates ELF64/LSB/aarch64, rejects relocations
+- Maps `PT_LOAD` segments into anonymous memory
+- `__builtin___clear_cache` for aarch64 icache coherence
+- `.symtab` symbol lookup; entry-point fallback for `"f"`
+- Calls `f(in_buf, in_len, out_buf, out_cap)`, prints `RET=`/`OUT=`
 
-### 10.3 Build
+Build (cached, mtime-based):
 
 ```
 clang -O2 -Wall -Wextra -Werror -std=c11 -fno-omit-frame-pointer \
       -fuse-ld=lld -o native_runner native_runner.c
 ```
 
-Cached (mtime-based), selftest after every build or cache hit.
+Selftest validates hex roundtrip after every build or cache hit.
 
-### 10.4 Runner Integration
+### 11.3 Runner Integration
 
 Five functions: `_resolve_native_harness_source`,
 `_ensure_native_harness_built`, `_parse_native_runner_output`,
-`_run_single_native_test`, `_run_native_tests`.
+`_run_single_native_test`, `_run_native_tests`. Stage 7 gated on all
+prior stages and `candidate.exe` existing.
 
-Stage 7 gated on all six prior stages and `candidate.exe` existing.
+### 11.4 Schema Extension
 
-### 10.5 Schema Extension
-
-`native_test_results` array and seven native metric fields added to
-`result_schema.json` (commit `a5d84da`). All optional. Verified committed:
-
-```
-$ python3 -c "... print('native_test_results' in j['properties'])"
-True
-$ git show a5d84da --stat | grep result_schema
-  irx/experiment1/harness/result_schema.json | 34 ++
-```
-
-### 10.6 Result
-
-All 10 native tests pass, bitwise-identical to lli.
+`native_test_results` array and seven native metric fields added
+(commit `a5d84da`, `result_schema.json | 34 ++`). All optional;
+pre-Step-H artifacts remain valid.
 
 ---
 
-## 11 Generation 8: Phase 2 Closure
+## 12 Generation 8: Phase 2 Closure
 
-Clean re-run from cleared artifact directory (2026-02-15 23:40 PST):
+Clean re-run (2026-02-15 23:40 PST) from cleared artifact directory:
 
 - All 7 stages PASS
 - lli 10/10, native 10/10
 - lli/native match: ALL 10 vectors agree
-- IDs stable: `de499765...` / `4254c627...`
-- Schema extension independently verified
-- Unit tests: 13/13 passed
+- IDs stable
+- Schema extension independently verified as committed
+- 13 unit tests pass
 
-Closure record committed as `PHASE2_CLOSURE.md` (commit `5201dd2`).
+Closure record: `PHASE2_CLOSURE.md` (commit `5201dd2`).
 
 ---
 
-## 12 Generation 9: Verdict Fix
+## 13 Generation 9: Verdict Fix
 
-### 12.1 Problem
+### 13.1 Problem
 
-The JSON artifact hardcoded `"verdict": "ERROR"` regardless of stage
-outcomes. The verdict was derived from `gates.policy.ok`, which was always
-`False`. This meant a fully passing run was recorded as `ERROR`.
+The JSON artifact hardcoded `"verdict": "ERROR"` because it was derived
+from `gates.policy.ok`, which was always `False`. A fully passing run
+was incorrectly recorded as ERROR.
 
-### 12.2 Solution
+### 13.2 Fix
 
-Added `compute_verdict(runs, metrics, gates)` — a pure function at line 73
-of `phase2_runner.py`:
+Added `compute_verdict(runs, metrics, gates)` at line 73 of
+`phase2_runner.py`. Pure function, no side effects:
 
 ```python
 def compute_verdict(runs, metrics, gates) -> tuple[str, str]:
@@ -426,61 +329,81 @@ def compute_verdict(runs, metrics, gates) -> tuple[str, str]:
         return ("FAIL", "LLI_TESTS_FAILED")
     if metrics.get("native_tests_failed", 0) > 0:
         return ("FAIL", "NATIVE_TESTS_FAILED")
-
     if not executed:
         return ("ERROR", "NO_STAGES_EXECUTED")
-
-    if all(r["ok"] for r in runs) and ...:
+    if all(r["ok"] for r in runs) and zero test failures:
         return ("PASS", "ALL_STAGES_PASS")
-
     return ("ERROR", "INDETERMINATE_VERDICT")
 ```
 
-The verdict detail is appended to `gates.policy.detail` as
-`;verdict=ALL_STAGES_PASS` (or the corresponding failure/error reason).
-`gates.policy.ok` is set to `True` when verdict is `"PASS"`.
+Verdict detail appended to `gates.policy.detail` as
+`;verdict=ALL_STAGES_PASS`. `gates.policy.ok` set to `True` when PASS.
 
-No schema changes were needed: the `verdict` field was already an enum of
-`["PASS", "FAIL", "ERROR"]`, and `gates.policy.detail` is a string.
+No schema changes. No stage pipeline, env, limit, or per-test logic
+changes. 8 unit tests added (`test_verdict.py`).
 
-### 12.3 What Changed
+### 13.3 Before/After
 
-- `phase2_runner.py`: added `compute_verdict()`, replaced hardcoded
-  `"verdict": "ERROR"` with computed verdict, updated `gates.policy`
-- `tests/test_verdict.py`: 8 new hermetic unit tests covering PASS, FAIL
-  (stage, lli, native), and ERROR (no stages) cases
-- No frozen artifacts, schema, stage pipeline, env, limits, or per-test
-  logic modified
-
-### 12.4 Verification
-
-Post-fix evidence run:
-
-```
-verdict: PASS
-candidate_id: de499765dfe2e94002b34a27d113273ffe5c4345c6463f665f87cc5b2fb610b6
-run_id:       4254c62717bfc6fbabf0ca1cf107b9519e030649890ea8b3d8acf9c9367f5d60
-policy.ok: True
-policy.detail (tail): verdict=ALL_STAGES_PASS
-jsonschema: VALID
-```
-
-All stage results, test outcomes, IDs, and work artifact sizes unchanged.
-The only field that changed in the JSON output is `verdict` (`"ERROR"` →
-`"PASS"`) and `gates.policy` (`.ok` now `True`, `.detail` has
-`;verdict=ALL_STAGES_PASS` appended).
+| Field | Before | After |
+|-------|--------|-------|
+| `verdict` | `"ERROR"` (hardcoded) | `"PASS"` (computed) |
+| `gates.policy.ok` | `False` (hardcoded) | `True` (when all pass) |
+| `gates.policy.detail` tail | stage details only | `...;verdict=ALL_STAGES_PASS` |
 
 ---
 
-## 13 lli vs. Native Result Agreement
+## 14 Generation 10: Final Evidence Run
 
-All 10 vectors produce bitwise-identical results:
+Preflight on Pi (2026-02-16 00:05 PST):
+
+```
+Branch: main, HEAD: b00ab95
+py_compile: OK
+compute_verdict_present: True
+Unit tests: 13 native + 8 verdict = 21/21 pass
+Toolchain: llvm-as/opt/lli/llc/clang all 19.1.7
+```
+
+Clean A-H run:
+
+```
+precheck             ok=True
+llvm_as_parse        ok=True   exit=0
+opt_verify           ok=True   exit=0
+lli_tests            ok=True   exit=0
+llc_compile          ok=True   exit=0
+clang_link           ok=True   exit=0
+native_tests         ok=True   exit=0
+
+lli tests:    10/10 passed, 0 failed
+native tests: 10/10 passed, 0 failed
+lli/native match: ALL 10 tests agree
+```
+
+Verdict proof from newest artifact:
+
+```
+verdict: PASS
+gates.policy.ok: True
+gates.policy.detail_tail: ...;verdict=ALL_STAGES_PASS
+candidate_id_match: True
+run_id_match: True
+```
+
+Work artifact sizes: `candidate.bc` 1 928, `candidate.o` 1 008,
+`candidate.exe` 2 304 bytes — unchanged from all prior runs.
+
+Evidence log: `verification/evidence/logs/step_h_check_verdictfix_20260216_000503.log`
+
+---
+
+## 15 lli / Native Agreement
 
 | Vector | ret | out_hex | Description |
 |--------|-----|---------|-------------|
 | t01 | 4 | `00000000` | empty input, sum=0 |
-| t02 | 4 | `01000000` | single value: 1 |
-| t03 | 4 | `ffffffff` | single value: max |
+| t02 | 4 | `01000000` | single 1 |
+| t03 | 4 | `ffffffff` | single max |
 | t04 | 4 | `03000000` | 1+2=3 |
 | t05 | 4 | `00000000` | 0+0=0 |
 | t06 | 4 | `78563412` | 0x12345678 |
@@ -489,9 +412,13 @@ All 10 vectors produce bitwise-identical results:
 | t09 | -1 | *(empty)* | ERR_INVALID_INPUT |
 | t10 | 4 | `0a000000` | 1+2+3+4=10 |
 
+All 10 vectors bitwise-identical between lli and native. The LLVM
+compilation pipeline (llvm-as → opt → llc → clang/lld) preserves
+candidate semantics on aarch64 for the tested domain.
+
 ---
 
-## 14 Metrics Summary
+## 16 Metrics
 
 ```
 lli:    10/10 passed, 0 failed, 0 mismatches, 0 timeouts, 0 crashes
@@ -499,7 +426,7 @@ native: 10/10 passed, 0 failed, 0 mismatches, 0 timeouts, 0 crashes
 verdict: PASS (ALL_STAGES_PASS)
 ```
 
-### 14.1 Deterministic IDs
+### 16.1 Deterministic IDs
 
 ```
 candidate_id: de499765dfe2e94002b34a27d113273ffe5c4345c6463f665f87cc5b2fb610b6
@@ -510,7 +437,7 @@ Stable across every run throughout the project.
 
 ---
 
-## 15 Work Artifacts
+## 17 Work Artifacts
 
 | File | Size | Format |
 |------|------|--------|
@@ -522,76 +449,58 @@ Stable across every run throughout the project.
 
 ---
 
-## 16 Stub Candidate Baseline
+## 18 Stub Candidate Baseline
 
-Minimal stub (`ret i64 0`) confirms gate behavior:
+Minimal stub (`ret i64 0`) confirms gate behavior and verdict logic:
 
 | Stage | ok | Notes |
 |-------|----|-------|
 | precheck | true | |
 | llvm_as_parse | true | exit=0 |
 | opt_verify | true | exit=0 |
-| lli_tests | false | 0/10, all RETURN_MISMATCH |
+| lli_tests | false | 0/10, RETURN_MISMATCH |
 | llc_compile | false | NOT_RUN |
 | clang_link | false | NOT_RUN |
 | native_tests | false | NOT_RUN |
 
-Verdict: `"FAIL"` (STAGE_FAILED:lli_tests).
+Verdict: `"FAIL"` (`STAGE_FAILED:lli_tests`).
 
 ---
 
-## 17 Unit Tests
+## 19 Unit Tests
 
-21 hermetic tests across two files:
+21 hermetic tests, two files, no Pi toolchain required:
 
-**`test_native_tests.py`** (13 tests):
-- TestParseNativeRunnerOutput (8): success, negative, missing, invalid,
-  empty, error, uppercase normalization
-- TestResolveNativeHarnessSource (1): missing source
-- TestNativeTestsGating (3): skeleton shape, all-stage gate, exe requirement
-- TestNativeTestsNotRunWhenHarnessMissing (1): mocked resolve
+**`test_native_tests.py`** (13):
+- Output parsing: success, negative ret, missing ret/out, invalid format,
+  empty, error code, uppercase normalization
+- Harness resolution: missing source
+- Gating: skeleton shape, all-stage gate, exe requirement, missing harness
 
-**`test_verdict.py`** (8 tests):
-- TestComputeVerdictPass (2): all pass, pass without native
-- TestComputeVerdictFailStage (2): opt_verify fail, precheck fail
-- TestComputeVerdictFailLliTests (1): lli failures
-- TestComputeVerdictFailNativeTests (1): native failures
-- TestComputeVerdictError (1): no stages executed
-- TestComputeVerdictNotRunDownstream (1): partial with upstream failure
+**`test_verdict.py`** (8):
+- PASS: all ok; pass without native metrics
+- FAIL: stage failure (opt_verify, precheck); lli failures; native failures
+- ERROR: no stages executed
+- FAIL: partial execution with upstream failure
 
 All 21 pass (< 0.01s).
 
 ---
 
-## 18 Verification Fixtures and Evidence
+## 20 Evidence and Reproduction
 
-### 18.1 Layout
+### 20.1 Evidence Logs
 
-```
-irx/experiment1/
-  PHASE2_CLOSURE.md                              Closure record
-  pi_report.md                                   This report
-  verification/
-    README.md                                    Run instructions
-    candidates/
-      sum_u32_le_known_good.ll                   Stub for wiring checks
-    evidence/
-      STEP_F_EVIDENCE.md                         Step F/H PASS conditions
-      step_f_check.sh                            A-F check
-      step_h_check.sh                            A-H check
-      logs/
-        step_h_check_20260215_234036.log         Closure evidence
-        step_h_check_verdictfix_20260215_235338.log  Verdict fix evidence
-    step_f/
-      sum_u32_le_good.ll                         Known-good candidate
-  harness/native/
-    native_runner.c                              Harness source
-```
+| Log | Date | Context |
+|-----|------|---------|
+| `step_h_check_20260215_234036.log` | 2026-02-15 | Phase 2 closure |
+| `step_h_check_verdictfix_20260215_235338.log` | 2026-02-15 | Verdict fix validation |
+| `step_h_check_verdictfix_20260216_000503.log` | 2026-02-16 | Final preflight + evidence |
 
-### 18.2 Reproduction
+### 20.2 Reproduction Commands
 
 ```bash
-# Full A-H check
+# Full A-H evidence check
 rm -rf irx/experiment1/runs/*
 bash irx/experiment1/verification/evidence/step_h_check.sh
 
@@ -603,11 +512,46 @@ python3 -m unittest runner/phase2/tests/test_verdict.py
 python3 runner/phase2/phase2_runner.py \
   --candidate irx/experiment1/verification/step_f/sum_u32_le_good.ll \
   --task sum_u32_le
+
+# Verify verdict in newest artifact
+python3 -c "import json, glob, os
+p = sorted(glob.glob('irx/experiment1/runs/*/*.json'),
+           key=os.path.getmtime)[-1]
+j = json.load(open(p))
+print('verdict:', j['verdict'])"
+```
+
+### 20.3 Key Files
+
+```
+irx/experiment1/
+  PHASE2_CLOSURE.md                  Closure record
+  pi_report.md                       This report
+  verification/
+    evidence/
+      step_f_check.sh                A-F check
+      step_h_check.sh                A-H check
+      logs/                          Evidence logs
+    step_f/
+      sum_u32_le_good.ll             Known-good candidate
+  harness/
+    native/native_runner.c           ELF loader harness
+    result_schema.json               Frozen schema
+    constants.json                   Frozen limits
+    id_rules.json                    ID derivation rules
+  env/
+    tool_versions.json               Frozen tool paths
+    target.json                      Target triple
+runner/phase2/
+  phase2_runner.py                   Pipeline runner
+  tests/
+    test_native_tests.py             13 harness/gating tests
+    test_verdict.py                  8 verdict logic tests
 ```
 
 ---
 
-## 19 Commit History
+## 21 Commit History
 
 | Hash | Message |
 |------|---------|
@@ -622,95 +566,77 @@ python3 runner/phase2/phase2_runner.py \
 | `a5d84da` | exp1: implement Step H native_tests and rewrite pi_report |
 | `5201dd2` | exp1: Phase 2 closure record and Step H reproduction evidence |
 | `8762240` | phase2: fix verdict computation from stage outcomes |
+| `b00ab95` | docs: rewrite pi_report with verdict fix and complete Phase 2 history |
 
 ---
 
-## 20 Properties Verified
+## 22 Properties Verified
 
-1. **Determinism**: Subprocess environments derived from frozen artifacts.
-   No host variables. Repeated runs produce identical IDs and
-   (timestamp-masked) output.
+1. **Determinism** — Environments derived from frozen artifacts. No host
+   variables. Repeated runs produce identical IDs and output.
 
-2. **Isolation**: LLVM tools see four variables. Native harness sees three.
-   No user environment leaks. clang_link and harness build use `-fuse-ld=lld`
-   to avoid `PATH` dependency.
+2. **Isolation** — LLVM tools: 4 env vars. Native harness: 3 env vars.
+   clang_link and harness build use `-fuse-ld=lld` to avoid `PATH`.
 
-3. **Resource Limits**: `RLIMIT_RSS` at 64 MiB. `RLIMIT_AS` not applied.
+3. **Resource Limits** — RSS at 64 MiB. AS not applied.
 
-4. **Schema Compliance**: All artifacts validate against the frozen schema.
-   `jsonschema.validate()` confirms. No schema changes for the verdict fix.
+4. **Schema Compliance** — `jsonschema.validate()` confirms every
+   artifact. No schema changes for the verdict fix.
 
-5. **Gate Ordering**: Failure propagates NOT_RUN downstream. Confirmed with
-   stub and known-good candidate.
+5. **Gate Ordering** — Failure propagates NOT_RUN downstream. Confirmed
+   with stub (0/10 → downstream NOT_RUN, verdict FAIL) and known-good
+   (10/10 → all PASS, verdict PASS).
 
-6. **Artifact Integrity**: Each stage produces expected output at
-   deterministic paths, verified non-empty before downstream proceeds.
+6. **Artifact Integrity** — `.bc`, `.o`, `.exe` produced at deterministic
+   paths, verified non-empty before downstream stages.
 
-7. **End-to-End**: Correct candidate traverses all seven stages.
-   Interpreter and native results agree bitwise.
+7. **Interpreter-Native Equivalence** — All 10 vectors bitwise-identical
+   between lli and native execution.
 
-8. **Correct Verdict**: `compute_verdict` derives verdict from stage
-   outcomes and test metrics, not from a hardcoded value. PASS when all
-   stages succeed, FAIL when any fails, ERROR when no stages execute.
+8. **Correct Verdict** — Computed from stage outcomes and test metrics.
+   PASS when all succeed, FAIL when any fails, ERROR when no stages run.
 
-9. **Linker Determinism**: Both clang_link and harness build use
-   `-fuse-ld=lld`, same output regardless of host `PATH`.
+9. **Linker Determinism** — `-fuse-ld=lld` for both clang_link and
+   harness build. Same output regardless of host `PATH`.
 
-10. **Interpreter-Native Equivalence**: All 10 vectors produce identical
-    results between lli and native, confirming the compilation pipeline
-    preserves semantics on aarch64.
+10. **Authority Revision** — t08 correction was a single field in one
+    file. No other vectors or semantics altered.
 
 ---
 
-## Appendix A — LLVM Shared Library
+## Appendix A — clang_link Flags
 
-```
-Library:   /usr/lib/aarch64-linux-gnu/libLLVM.so.19.1 (123 MB)
-Symlink:   /usr/lib/llvm-19/lib/libLLVM.so.19.1 -> ../../aarch64-linux-gnu/libLLVM.so.19.1
-Derivation: frozen tool parent.parent / lib
-```
-
-## Appendix B — LLVM 19 Pass Manager
-
-```
-Legacy:  opt -verify -disable-output         -> Exit 1 (unsupported in LLVM 19)
-New:     opt -passes=verify -disable-output   -> Exit 0
-```
-
-## Appendix C — t08 Byte Order Proof
-
-```
-Input:  ffffffffffffffff -> two u32: 0xFFFFFFFF + 0xFFFFFFFF
-Sum:    0xFFFFFFFE (mod 2^32)
-LE:     [FE, FF, FF, FF] -> "feffffff"  (correct)
-BE:     [FF, FF, FF, FE] -> "fffffffe"  (original, incorrect)
-```
-
-## Appendix D — clang_link Flags
-
-| Flag | Purpose |
-|------|---------|
-| `-target aarch64-unknown-linux-gnu` | From frozen `target.json` |
-| `-fuse-ld=lld` | Colocated LLD; no PATH needed |
-| `-nostdlib` | No CRT objects |
+| Flag | Why |
+|------|-----|
+| `-target aarch64-unknown-linux-gnu` | From `target.json` |
+| `-fuse-ld=lld` | No `PATH` in env; colocated LLD |
+| `-nostdlib` | No CRT objects (candidate has no `main`) |
 | `-Wl,--no-dynamic-linker` | No PT_INTERP |
 | `-Wl,-e,f` | Entry point = `f` |
 
-## Appendix E — Native Harness Flow
+## Appendix B — Native Harness Flow
 
 ```
 native_runner <exe> <in_hex> <out_cap> f
-  -> open + mmap(PROT_READ)
-  -> validate ELF64/LE/aarch64, reject relocations
-  -> compute PT_LOAD extent, mmap(MAP_ANONYMOUS), memcpy, zero BSS
-  -> __builtin___clear_cache (aarch64 icache coherence)
+  -> mmap file, validate ELF64/LE/aarch64
+  -> reject relocations (fail closed)
+  -> map PT_LOAD segments, zero BSS
+  -> __builtin___clear_cache (aarch64 I/D cache incoherence)
   -> mprotect per-segment
-  -> .symtab lookup for "f" (fallback: e_entry)
-  -> call fn(in_buf, in_len, out_buf, out_cap)
-  -> printf RET=/OUT=
+  -> .symtab lookup "f" (fallback: e_entry)
+  -> fn(in_buf, in_len, out_buf, out_cap)
+  -> print RET=<ret> / OUT=<hex>
 ```
 
-## Appendix F — Test Vectors (sum_u32_le)
+## Appendix C — t08 Byte Order
+
+```
+0xFFFFFFFF + 0xFFFFFFFF = 0xFFFFFFFE mod 2^32
+LE: [FE,FF,FF,FF] -> "feffffff"  (correct)
+BE: [FF,FF,FF,FE] -> "fffffffe"  (original, wrong)
+```
+
+## Appendix D — Test Vectors (sum_u32_le)
 
 ```
 t01: in=""                                 ret=4   out="00000000"
@@ -725,26 +651,24 @@ t09: in="00000000ffffffff01000000"         ret=-1  out=""
 t10: in="01000000020000000300000004000000" ret=4   out="0a000000"
 ```
 
-## Appendix G — Verdict Logic (Before and After)
+## Appendix E — LLVM 19 Pass Manager
 
-Before (hardcoded):
-```python
-"verdict": "ERROR",
-# gates.policy.ok always False
+```
+opt -verify -disable-output         -> Exit 1 (unsupported)
+opt -passes=verify -disable-output  -> Exit 0
 ```
 
-After (computed):
-```python
-verdict_str, verdict_detail = compute_verdict(runs_skeleton, metrics_obj, gates_obj)
-gates_obj["policy"]["ok"] = verdict_str == "PASS"
-gates_obj["policy"]["detail"] = policy_base_detail + ";verdict=" + verdict_detail
-# ...
-"verdict": verdict_str,
+## Appendix F — LLVM Shared Library
+
+```
+/usr/lib/aarch64-linux-gnu/libLLVM.so.19.1 (123 MB)
+Symlink: /usr/lib/llvm-19/lib/libLLVM.so.19.1
+Derived from: frozen tool path parent.parent / lib
 ```
 
 ---
 
-*Verified on Raspberry Pi 5 — Raspberry Pi OS 64-bit — LLVM 19.1.7*
-*Phase 2 complete through Step H: PASS*
-*Verdict: PASS (ALL_STAGES_PASS)*
+*Raspberry Pi 5 — Raspberry Pi OS 64-bit — LLVM 19.1.7*
+*Phase 2 complete through Step H — verdict: PASS (ALL_STAGES_PASS)*
 *lli/native agreement: ALL 10 vectors match*
+*Last verified: 2026-02-16 00:05 PST*
