@@ -210,3 +210,7 @@ The candidate passes all pipeline stages through `lli_tests` (10/10 vectors).
 from `"fffffffe"` (MSB-first value notation) to `"feffffff"` (little-endian byte order).
 This aligns t08 with the LE-byte encoding convention used by the ABI harness and all
 other vectors in the file. No other fields, vectors, or files were changed.
+
+## Verification Fixtures
+
+Pipeline wiring fixtures and run instructions are in `verification/README.md`.
