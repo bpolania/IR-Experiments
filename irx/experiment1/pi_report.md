@@ -35,7 +35,7 @@ Milestones relevant to the pipeline implementation:
 | `f0a6261` | 2026-02-15 22:28 | Step F evidence bundle and `step_f_check.sh` |
 | `b0d8cd9` | 2026-02-15 23:02 | Step G `clang_link` (freestanding ELF linking) |
 | `a5d84da` | 2026-02-15 23:32 | Step H `native_tests`, result schema extension with native metrics |
-| `5201dd2` | 2026-02-15 23:41 | Phase 2 closure record and Step H evidence log |
+| `5201dd2` | 2026-02-15 23:41 | Add `PHASE2_CLOSURE.md` and commit `step_h_check_20260215_234036.log` (Step H evidence) |
 | `8762240` | 2026-02-15 23:55 | Fix verdict computation from stage outcomes (`compute_verdict()`) |
 | `b5be4f7` | 2026-02-16 01:35 | Fix stale `i32` signature_ir in constants.json and 3 spec.json files |
 
@@ -46,7 +46,7 @@ A    irx/experiment1/PHASE2_CLOSURE.md
 A    irx/experiment1/verification/evidence/logs/step_h_check_20260215_234036.log
 ```
 
-Two files added: the Phase 2 closure record and the first Step H evidence log.
+Two files added: `PHASE2_CLOSURE.md` and `step_h_check_20260215_234036.log`.
 
 ---
 
@@ -902,14 +902,15 @@ result.
 
 ---
 
-## 11. Result JSON Structure
+## 11. Result JSON Structure (shape, not literal JSON)
 
 The result object is assembled at lines 1888-1903 of `phase2_runner.py` and
 validated against the frozen schema at line 1905 before being written to disk
 at line 1906.
 
-**Complete structure of the known-good result** (candidate `de4997...`,
-run `425c62...`, verdict PASS):
+The following is a schematic shape of the known-good result (candidate
+`de4997...`, run `4254c6...`, verdict PASS). Keys are unquoted for
+readability; `timestamps` values are ISO 8601 UTC strings.
 
 ```
 {
@@ -917,13 +918,13 @@ run `425c62...`, verdict PASS):
   task: "sum_u32_le"
   candidate_id: "de499765dfe2e94002b34a27d113273ffe5c4345c6463f665f87cc5b2fb610b6"
   run_id: "4254c62717bfc6fbabf0ca1cf107b9519e030649890ea8b3d8acf9c9367f5d60"
-  timestamps: { started_at, finished_at }  -- ISO 8601 UTC
+  timestamps: { started_at, finished_at }
   gates:
     parse:   { ok: true, detail: "LOADED_STEP_A:...;PRECHECK_PASS:...;LLVM_AS_PARSE_PASS" }
     verify:  { ok: true, detail: "LOADED_STEP_A:...;OPT_VERIFY_PASS" }
     policy:  { ok: true, detail: "LOADED_STEP_A:...;LLC_COMPILE_PASS;CLANG_LINK_PASS;NATIVE_TESTS_PASS:...;verdict=ALL_STAGES_PASS" }
     tests:   { ok: true, detail: "LOADED_STEP_A:...;LLI_TESTS_PASS:..." }
-  runs: [7 stages, all ok=true, exit_code=0 (except precheck: exit_code=null)]
+  runs: [7 stages, all ok=true, exit_code=0 except precheck which has exit_code=null]
   metrics:
     tests_total: 10, tests_passed: 10, tests_failed: 0
     ret_mismatches: 0, output_mismatches: 0, timeouts: 0, crashes: 0
