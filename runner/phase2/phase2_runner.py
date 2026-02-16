@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
+import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -16,6 +20,10 @@ from lib.schema_validate import SchemaValidationError, validate_json_schema_inst
 
 
 class FrozenLimitsMissingError(RuntimeError):
+    pass
+
+
+class FrozenToolPathMissingError(RuntimeError):
     pass
 
 
@@ -70,6 +78,49 @@ def _load_precheck_limits(artifacts: dict[str, Any], repo_root: Path) -> tuple[i
     return max_bytes, max_lines
 
 
+def _load_stage_exec_limits(artifacts: dict[str, Any], repo_root: Path) -> tuple[int, int]:
+    constants_path = artifacts["constants_path"]
+    constants = artifacts["constants"]
+    limits = constants.get("limits")
+    if not isinstance(limits, dict):
+        raise FrozenLimitsMissingError(
+            "ERR_INTERNAL(-3): missing frozen limits object in "
+            f"{constants_path.relative_to(repo_root)}; required keys: timeout_stage_ms, max_rss_mib"
+        )
+    if "timeout_stage_ms" not in limits or "max_rss_mib" not in limits:
+        raise FrozenLimitsMissingError(
+            "ERR_INTERNAL(-3): missing frozen stage exec limit key(s) in "
+            f"{constants_path.relative_to(repo_root)}; required keys: timeout_stage_ms, max_rss_mib"
+        )
+    timeout_stage_ms = limits["timeout_stage_ms"]
+    max_rss_mib = limits["max_rss_mib"]
+    if not isinstance(timeout_stage_ms, int) or not isinstance(max_rss_mib, int):
+        raise FrozenLimitsMissingError(
+            "ERR_INTERNAL(-3): invalid frozen stage exec limit types in "
+            f"{constants_path.relative_to(repo_root)}; required integer keys: timeout_stage_ms, max_rss_mib"
+        )
+    return timeout_stage_ms, max_rss_mib
+
+
+def _resolve_llvm_as_path(artifacts: dict[str, Any], repo_root: Path) -> tuple[str | None, str]:
+    tool_versions = artifacts["tool_versions"]
+    tv_path = artifacts["tool_versions_path"]
+    source = str(tv_path.relative_to(repo_root))
+    detected = tool_versions.get("detected")
+    if not isinstance(detected, dict):
+        return None, f"llvm_as_not_executable path=<missing> source={source}"
+    llvm_as = detected.get("llvm-as")
+    if not isinstance(llvm_as, dict):
+        return None, f"llvm_as_not_executable path=<missing> source={source}"
+    path = llvm_as.get("path")
+    if not isinstance(path, str) or len(path.strip()) == 0:
+        return None, f"llvm_as_not_executable path=<missing> source={source}"
+    llvm_path = Path(path)
+    if not llvm_path.is_file() or not os.access(str(llvm_path), os.X_OK):
+        return None, f"llvm_as_not_executable path={path} source={source}"
+    return path, f"llvm_as_executable path={path} source={source}"
+
+
 def _count_lines(candidate_bytes: bytes) -> int:
     if len(candidate_bytes) == 0:
         return 0
@@ -115,6 +166,138 @@ def _apply_precheck(
     return True, f"PRECHECK_PASS:bytes={byte_count}/{max_bytes};lines={line_count}/{max_lines}"
 
 
+def _map_signal_to_crash_type(sig_num: int) -> str | None:
+    mapping = {
+        signal.SIGSEGV: "SIGSEGV",
+        signal.SIGILL: "SIGILL",
+        signal.SIGABRT: "SIGABRT",
+        signal.SIGFPE: "SIGFPE",
+    }
+    return mapping.get(sig_num)
+
+
+def _run_llvm_as_parse(
+    *,
+    llvm_as_path: str,
+    work_dir: Path,
+    timeout_stage_ms: int,
+    max_rss_mib: int,
+    stage_record: dict[str, Any],
+) -> tuple[bool, str]:
+    in_name = "candidate.ll"
+    out_name = "candidate.bc"
+    out_path = work_dir / out_name
+    if out_path.exists():
+        out_path.unlink()
+
+    env = {
+        "LC_ALL": "C",
+        "LANG": "C",
+        "TZ": "UTC",
+    }
+
+    def _preexec() -> None:
+        try:
+            import resource
+
+            rss_bytes = max_rss_mib * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (rss_bytes, rss_bytes))
+            if hasattr(resource, "RLIMIT_RSS"):
+                resource.setrlimit(resource.RLIMIT_RSS, (rss_bytes, rss_bytes))
+        except Exception:
+            # Best effort per requirement.
+            pass
+
+    proc = subprocess.Popen(
+        [llvm_as_path, "-o", out_name, in_name],
+        cwd=str(work_dir),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+        preexec_fn=_preexec,
+    )
+
+    timed_out = False
+    try:
+        _, stderr = proc.communicate(timeout=timeout_stage_ms / 1000.0)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        _, stderr = proc.communicate()
+
+    rc = proc.returncode if proc.returncode is not None else -1
+    stderr_text = (stderr or "").strip()
+    stderr_compact = " ".join(stderr_text.split())[:240]
+
+    stage_record["duration_ms"] = 0
+    stage_record["rss_mib"] = None
+
+    if timed_out:
+        stage_record["ok"] = False
+        stage_record["exit_code"] = None
+        stage_record["crash"] = {
+            "type": "TIMEOUT",
+            "signal": None,
+            "detail": f"llvm-as timeout after {timeout_stage_ms}ms",
+        }
+        return False, "LLVM_AS_PARSE_FAIL:timeout"
+
+    if rc == 0:
+        if not out_path.exists() or out_path.stat().st_size == 0:
+            stage_record["ok"] = False
+            stage_record["exit_code"] = 0
+            stage_record["crash"] = {
+                "type": "PARSE_FAIL",
+                "signal": None,
+                "detail": "llvm-as reported success but candidate.bc missing or empty",
+            }
+            return False, "LLVM_AS_PARSE_FAIL:missing_or_empty_bc"
+        stage_record["ok"] = True
+        stage_record["exit_code"] = 0
+        stage_record["crash"] = None
+        return True, "LLVM_AS_PARSE_PASS"
+
+    # Non-zero return handling
+    if rc < 0:
+        sig_num = -rc
+        mapped = _map_signal_to_crash_type(sig_num)
+        if mapped is not None:
+            stage_record["ok"] = False
+            stage_record["exit_code"] = None
+            stage_record["crash"] = {
+                "type": mapped,
+                "signal": sig_num,
+                "detail": f"llvm-as terminated by signal {sig_num}",
+            }
+            return False, f"LLVM_AS_PARSE_FAIL:signal_{sig_num}"
+
+    lower_err = stderr_text.lower()
+    if "out of memory" in lower_err or "cannot allocate memory" in lower_err:
+        stage_record["ok"] = False
+        stage_record["exit_code"] = rc if rc >= 0 else None
+        stage_record["crash"] = {
+            "type": "OOM",
+            "signal": None if rc >= 0 else -rc,
+            "detail": "llvm-as reported memory exhaustion",
+        }
+        return False, "LLVM_AS_PARSE_FAIL:oom"
+
+    stage_record["ok"] = False
+    stage_record["exit_code"] = rc if rc >= 0 else None
+    stage_record["crash"] = {
+        "type": "PARSE_FAIL",
+        "signal": None if rc >= 0 else -rc,
+        "detail": f"llvm-as parse failed; rc={rc}; stderr={stderr_compact}",
+    }
+    return False, "LLVM_AS_PARSE_FAIL:parse_fail"
+
+
 def run_step_a(
     repo_root: Path,
     task: str,
@@ -128,6 +311,7 @@ def run_step_a(
     candidate_path = discover_candidate_path(exp_root=exp_root, explicit_candidate=candidate)
     candidate_bytes = candidate_path.read_bytes()
     max_candidate_bytes, max_candidate_lines = _load_precheck_limits(artifacts, repo_root)
+    timeout_stage_ms, max_rss_mib = _load_stage_exec_limits(artifacts, repo_root)
 
     authority = resolve_id_authority(artifacts=artifacts, repo_root=repo_root)
     print(format_probe_summary(authority["probe_summary"]))
@@ -166,6 +350,30 @@ def run_step_a(
         max_bytes=max_candidate_bytes,
         max_lines=max_candidate_lines,
     )
+    llvm_as_ok = False
+    llvm_as_detail = "LLVM_AS_PARSE_NOT_RUN:precheck_failed"
+    if precheck_ok:
+        llvm_as_path, llvm_as_path_detail = _resolve_llvm_as_path(artifacts, repo_root)
+        if llvm_as_path is None:
+            runs_skeleton[1]["ok"] = False
+            runs_skeleton[1]["exit_code"] = None
+            runs_skeleton[1]["duration_ms"] = 0
+            runs_skeleton[1]["rss_mib"] = None
+            runs_skeleton[1]["crash"] = {
+                "type": "POLICY_VIOLATION",
+                "signal": None,
+                "detail": llvm_as_path_detail,
+            }
+            llvm_as_ok = False
+            llvm_as_detail = f"LLVM_AS_PARSE_FAIL:{llvm_as_path_detail}"
+        else:
+            llvm_as_ok, llvm_as_detail = _run_llvm_as_parse(
+                llvm_as_path=llvm_as_path,
+                work_dir=work_dir,
+                timeout_stage_ms=timeout_stage_ms,
+                max_rss_mib=max_rss_mib,
+                stage_record=runs_skeleton[1],
+            )
 
     result_obj: dict[str, Any] = {
         "experiment": str(artifacts["constants"].get("experiment", "1")),
@@ -178,8 +386,8 @@ def run_step_a(
         },
         "gates": {
             "parse": {
-                "ok": False,
-                "detail": loaded_artifacts_detail + ";" + precheck_detail,
+                "ok": llvm_as_ok,
+                "detail": loaded_artifacts_detail + ";" + precheck_detail + ";" + llvm_as_detail,
             },
             "verify": {
                 "ok": False,
@@ -202,7 +410,7 @@ def run_step_a(
             "ret_mismatches": 0,
             "output_mismatches": 0,
             "timeouts": 0,
-            "crashes": 0 if precheck_ok else 1,
+            "crashes": 0 if (precheck_ok and llvm_as_ok) else 1,
         },
         "verdict": "ERROR",
     }

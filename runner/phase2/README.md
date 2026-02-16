@@ -1,8 +1,8 @@
-# Phase 2 Runner - Step A + Step B Precheck
+# Phase 2 Runner - Step A + Step B + Step C
 
 This module provides the Phase 2 Step A skeleton for Experiment 1.
 
-Step A/Step B behavior:
+Step A/Step B/Step C behavior:
 - Loads frozen artifacts (tool snapshot, limits, schema, and test vectors).
 - Discovers candidate `.ll` deterministically using explicit `--candidate`.
 - Recovers authoritative `candidate_id` / `run_id` rules using repo evidence precedence:
@@ -19,6 +19,11 @@ Step A/Step B behavior:
   - line_count = number of `\\n` bytes + 1 when non-empty and not newline-terminated
   - line_count = 0 when empty
 - Copies the candidate byte-for-byte to `irx/experiment1/runs/<candidate_id>/<run_id>/work/candidate.ll`.
+- Executes Step C `llvm-as` parse gate using frozen tool path and limits:
+  - tool path: `env/tool_versions.json` → `detected.llvm-as.path`
+  - limits: `harness/constants.json` → `limits.timeout_stage_ms`, `limits.max_rss_mib`
+  - invocation in work dir: `llvm-as -o candidate.bc candidate.ll`
+  - deterministic environment: `LC_ALL=C`, `LANG=C`, `TZ=UTC`
 - Emits a schema-validated result to `irx/experiment1/runs/<candidate_id>/<run_id>.json`.
 
 No LLVM tools are executed in Step A.
@@ -60,4 +65,10 @@ Run over-lines case (> `max_ll_lines`):
 
 ```bash
 python3 runner/phase2/phase2_runner.py --candidate /tmp/cand_over_lines.ll
+```
+
+Run parse-fail case (invalid IR syntax):
+
+```bash
+python3 runner/phase2/phase2_runner.py --candidate /tmp/cand_invalid.ll
 ```
