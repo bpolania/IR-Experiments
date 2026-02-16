@@ -55,7 +55,7 @@
       "in_hex": "ffffffffffffffff",
       "out_cap": 4,
       "expected_ret": 4,
-      "expected_out_hex": "fffffffe"
+      "expected_out_hex": "feffffff"
     },
     {
       "test_id": "t09",

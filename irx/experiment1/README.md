@@ -188,3 +188,25 @@ Notes:
 - Step C uses `llvm-as` to produce `work/candidate.bc`.
 - Step D runs `opt -verify -disable-output candidate.bc`.
 - Step E is unblocked by the `test_results` schema container and the `lli_abi_runner.py` harness + shim.
+
+## Step F End-to-End Verification Fixture
+
+A known-good `sum_u32_le` candidate is provided in `verification/step_f/` for pipeline verification:
+
+- `verification/step_f/sum_u32_le_good.ll` - Correct implementation passing 9/10 frozen vectors
+- `verification/step_f/run_step_f_check.sh` - Automated verification script
+
+Run:
+
+```bash
+bash irx/experiment1/verification/step_f/run_step_f_check.sh
+```
+
+The candidate passes all pipeline stages through `lli_tests` (10/10 vectors).
+
+## Authority Revision: t08 expected_out_hex correction
+
+`tasks/sum_u32_le/tests.json` vector t08 (index 7) `expected_out_hex` was corrected
+from `"fffffffe"` (MSB-first value notation) to `"feffffff"` (little-endian byte order).
+This aligns t08 with the LE-byte encoding convention used by the ABI harness and all
+other vectors in the file. No other fields, vectors, or files were changed.
