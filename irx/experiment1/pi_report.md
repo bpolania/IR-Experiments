@@ -4,9 +4,10 @@
 
 | Commit | Date (PST) | Milestone |
 |---|---|---|
-| `a5d84da` | 2026-02-15 23:32 | Step H implementation and Phase 2 closure |
+| `a5d84da` | 2026-02-15 23:32 | Implement Step H native_tests, extend result schema |
+| `5201dd2` | 2026-02-15 23:41 | Phase 2 closure record and Step H evidence log |
 | `8762240` | 2026-02-15 23:55 | Verdict computation fix |
-| `8563fd2` | 2026-02-16 00:30 | Regression sweep baseline |
+| `8563fd2` | 2026-02-16 00:30 | Update pi_report.md (regression sweep ran at this HEAD) |
 | `b104ff5` | 2026-02-16 00:48 | Documentation accuracy pass (stage lettering, native loader) |
 
 ## Platform
@@ -74,7 +75,9 @@ This step labeling is consistent across the entire repository: evidence
 scripts are named `step_f_check.sh` and `step_h_check.sh`, the Phase 2
 closure record references Steps A-H, and commit messages use Step F for
 llc_compile, Step G for clang_link, and Step H for native_tests. The runner
-code emits `LOADED_STEP_A:` in the gate detail strings during initialization.
+code emits `LOADED_STEP_A:` in the gate detail strings during initialization
+(line 1440 of `phase2_runner.py`; confirmed present in all four `gates.*.detail`
+fields of produced result JSON artifacts).
 
 ### Stage gating
 
@@ -495,10 +498,10 @@ All pipeline evidence is stored under
 
 | Log file | Date | HEAD | Content |
 |---|---|---|---|
-| `step_h_check_20260215_234036.log` | 2026-02-15 | `a5d84da` | Phase 2 closure run, 7/7 stages PASS |
-| `step_h_check_verdictfix_20260215_235338.log` | 2026-02-15 | `8762240` | First run after verdict fix |
-| `step_h_check_verdictfix_20260216_000503.log` | 2026-02-16 | post-`8762240` | Full proof chain: verdict PASS, ID match, artifact sizes |
-| `regression_sweep_20260216_003439.log` | 2026-02-16 | `8563fd2` | Three-task regression sweep, all verdicts correct |
+| `step_h_check_20260215_234036.log` | 2026-02-15 | `a5d84da` (inferred) | Step H evidence run (pre-closure), 7/7 stages PASS |
+| `step_h_check_verdictfix_20260215_235338.log` | 2026-02-15 | `f02c049` (inferred) | First run with uncommitted verdict fix |
+| `step_h_check_verdictfix_20260216_000503.log` | 2026-02-16 | `b00ab95` (inferred) | Full proof chain: verdict PASS, ID match, artifact sizes |
+| `regression_sweep_20260216_003439.log` | 2026-02-16 | `8563fd2` (explicit) | Three-task regression sweep, all verdicts correct |
 
 The final verdict fix evidence log (`step_h_check_verdictfix_20260216_000503.log`)
 includes a multi-part proof chain: the path to the result JSON, extraction of
@@ -564,6 +567,41 @@ python3 -m unittest runner/phase2/tests/test_verdict.py
 Expected output for the known-good sum_u32_le candidate: verdict PASS, lli
 10/10 passed, native 10/10 passed, lli/native match on all 10 vectors, all
 seven stages ok, schema validation passes.
+
+---
+
+## Verification Notes
+
+Evidence log HEAD values were determined as follows:
+
+- **`regression_sweep_20260216_003439.log`**: HEAD `8563fd2` is recorded
+  explicitly on line 3 of the log (`HEAD: 8563fd275f8e73d58ad2ced6b507e1cc4b155da9`).
+
+- **`step_h_check_20260215_234036.log`**: No explicit HEAD in the log. File
+  mtime is 23:40:37 PST. Commit `a5d84da` was authored at 23:32:47 and the
+  next commit `5201dd2` at 23:41:34. The log was therefore produced at HEAD
+  `a5d84da`. This was a pre-closure run — the closure record was committed
+  one minute later as `5201dd2`.
+
+- **`step_h_check_verdictfix_20260215_235338.log`**: No explicit HEAD. File
+  mtime is 23:53:39 PST. The last committed HEAD before this time was
+  `f02c049` (23:47:29). The uncommitted verdict fix changes (which became
+  commit `8762240` at 23:55:29) were present in the working tree when the
+  runner executed. Previous report versions attributed this log to `8762240`,
+  but `8762240` did not exist yet — the runner ran against uncommitted changes
+  on top of `f02c049`.
+
+- **`step_h_check_verdictfix_20260216_000503.log`**: No explicit HEAD. File
+  mtime is 00:05:05 PST on 2026-02-16. The last committed HEAD before this
+  time was `b00ab95` (00:00:28). The next commit `ef34058` was authored at
+  00:17:03. Previous report versions listed this as "post-`8762240`" which
+  was imprecise.
+
+The `LOADED_STEP_A:` prefix claim was verified by grep against both the
+runner source (`runner/phase2/phase2_runner.py` line 1440) and the produced
+result JSON artifact, where it appears in all four `gates.parse.detail`,
+`gates.verify.detail`, `gates.tests.detail`, and `gates.policy.detail`
+strings.
 
 ---
 
