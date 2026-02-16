@@ -219,6 +219,47 @@ def _resolve_lli_path(artifacts: dict[str, Any], repo_root: Path) -> tuple[str |
     return path, f"lli_executable path={path} source={source}"
 
 
+def _resolve_llc_path(artifacts: dict[str, Any], repo_root: Path) -> tuple[str | None, str]:
+    tool_versions = artifacts["tool_versions"]
+    tv_path = artifacts["tool_versions_path"]
+    source = str(tv_path.relative_to(repo_root))
+    detected = tool_versions.get("detected")
+    if not isinstance(detected, dict):
+        return None, f"llc_not_found_in_tool_versions key=detected.llc.path source={source}"
+
+    key_used = None
+    llc_entry = None
+    if isinstance(detected.get("llc"), dict):
+        key_used = "llc"
+        llc_entry = detected["llc"]
+    elif isinstance(detected.get("llvm-llc"), dict):
+        key_used = "llvm-llc"
+        llc_entry = detected["llvm-llc"]
+
+    if not isinstance(llc_entry, dict):
+        return None, f"llc_not_found_in_tool_versions key=detected.llc.path source={source}"
+
+    path = llc_entry.get("path")
+    if not isinstance(path, str) or len(path.strip()) == 0:
+        return None, f"llc_not_found_in_tool_versions key=detected.{key_used}.path source={source}"
+    p = Path(path)
+    if not p.is_file() or not os.access(str(p), os.X_OK):
+        return None, f"llc_not_executable path={path} source={source}"
+    return path, f"llc_executable path={path} source={source}"
+
+
+def _resolve_target_triple(artifacts: dict[str, Any], repo_root: Path) -> tuple[str | None, str]:
+    target_obj = artifacts["target"]
+    target_path = artifacts["target_path"]
+    source = str(target_path.relative_to(repo_root))
+    if not isinstance(target_obj, dict):
+        return None, f"llc_missing_target_triple source={source}"
+    triple = target_obj.get("target_triple")
+    if not isinstance(triple, str) or len(triple.strip()) == 0:
+        return None, f"llc_missing_target_triple source={source}"
+    return triple, f"target_triple={triple}"
+
+
 def _resolve_task_tests(artifacts: dict[str, Any], task: str) -> tuple[str | None, list[dict[str, Any]]]:
     if task in (None, "", "all_tasks"):
         return None, []
@@ -698,6 +739,108 @@ def _run_opt_verify(
     return False, "OPT_VERIFY_FAIL:verify_fail"
 
 
+def _run_llc_compile(
+    *,
+    llc_path: str,
+    target_triple: str,
+    work_dir: Path,
+    timeout_stage_ms: int,
+    max_rss_mib: int,
+    stage_record: dict[str, Any],
+) -> tuple[bool, str]:
+    out_name = "candidate.o"
+    out_path = work_dir / out_name
+    if out_path.exists():
+        out_path.unlink()
+
+    env, preexec_fn, _ = _prepare_llc_runtime(llc_path, max_rss_mib)
+    proc = subprocess.Popen(
+        [llc_path, "-filetype=obj", f"-mtriple={target_triple}", "-O0", "-o", out_name, "candidate.bc"],
+        cwd=str(work_dir),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+        preexec_fn=preexec_fn,
+    )
+
+    timed_out = False
+    try:
+        _, stderr = proc.communicate(timeout=timeout_stage_ms / 1000.0)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        _, stderr = proc.communicate()
+
+    rc = proc.returncode if proc.returncode is not None else -1
+    stderr_text = (stderr or "").strip()
+    stage_record["duration_ms"] = 0
+    stage_record["rss_mib"] = None
+
+    if timed_out:
+        stage_record["ok"] = False
+        stage_record["exit_code"] = None
+        stage_record["crash"] = {
+            "type": "TIMEOUT",
+            "signal": None,
+            "detail": f"llc_timeout ms={timeout_stage_ms}",
+        }
+        return False, "LLC_COMPILE_FAIL:timeout"
+
+    if rc == 0:
+        if not out_path.exists() or out_path.stat().st_size == 0:
+            stage_record["ok"] = False
+            stage_record["exit_code"] = 0
+            stage_record["crash"] = {
+                "type": "POLICY_VIOLATION",
+                "signal": None,
+                "detail": "llc_output_missing_or_empty path=candidate.o",
+            }
+            return False, "LLC_COMPILE_FAIL:missing_or_empty_output"
+        stage_record["ok"] = True
+        stage_record["exit_code"] = 0
+        stage_record["crash"] = None
+        return True, "LLC_COMPILE_PASS"
+
+    if rc < 0:
+        sig_num = -rc
+        mapped = _map_signal_to_crash_type(sig_num)
+        if mapped is not None:
+            stage_record["ok"] = False
+            stage_record["exit_code"] = None
+            stage_record["crash"] = {
+                "type": mapped,
+                "signal": sig_num,
+                "detail": f"llc terminated by signal {sig_num}",
+            }
+            return False, f"LLC_COMPILE_FAIL:signal_{sig_num}"
+
+    lower_err = stderr_text.lower()
+    if "out of memory" in lower_err or "cannot allocate memory" in lower_err:
+        stage_record["ok"] = False
+        stage_record["exit_code"] = rc if rc >= 0 else None
+        stage_record["crash"] = {
+            "type": "OOM",
+            "signal": None if rc >= 0 else -rc,
+            "detail": "llc reported memory exhaustion",
+        }
+        return False, "LLC_COMPILE_FAIL:oom"
+
+    stage_record["ok"] = False
+    stage_record["exit_code"] = rc if rc >= 0 else None
+    stage_record["crash"] = {
+        "type": "POLICY_VIOLATION",
+        "signal": None if rc >= 0 else -rc,
+        "detail": f"llc_failed exit_code={rc}",
+    }
+    return False, "LLC_COMPILE_FAIL:policy_violation"
+
+
 def run_step_a(
     repo_root: Path,
     task: str,
@@ -925,6 +1068,62 @@ def run_step_a(
             f"inspected_files_count={harness_probe.get('inspected_files_count')}"
         )
 
+    llc_ok = False
+    stage5_can_run = (
+        precheck_ok
+        and llvm_as_ok
+        and opt_ok
+        and lli_ok
+        and candidate_bc_path.is_file()
+        and candidate_bc_path.stat().st_size > 0
+    )
+    if not stage5_can_run:
+        llc_detail = "LLC_COMPILE_NOT_RUN:preconditions_failed"
+    else:
+        llc_path, llc_path_detail = _resolve_llc_path(artifacts, repo_root)
+        if llc_path is None:
+            runs_skeleton[4]["ok"] = False
+            runs_skeleton[4]["exit_code"] = None
+            runs_skeleton[4]["duration_ms"] = 0
+            runs_skeleton[4]["rss_mib"] = None
+            runs_skeleton[4]["crash"] = {
+                "type": "POLICY_VIOLATION",
+                "signal": None,
+                "detail": llc_path_detail,
+            }
+            llc_ok = False
+            llc_detail = f"LLC_COMPILE_FAIL:{llc_path_detail}"
+            crashes = 1
+        else:
+            target_triple, target_detail = _resolve_target_triple(artifacts, repo_root)
+            if target_triple is None:
+                runs_skeleton[4]["ok"] = False
+                runs_skeleton[4]["exit_code"] = None
+                runs_skeleton[4]["duration_ms"] = 0
+                runs_skeleton[4]["rss_mib"] = None
+                runs_skeleton[4]["crash"] = {
+                    "type": "POLICY_VIOLATION",
+                    "signal": None,
+                    "detail": "llc_missing_target_triple source=irx/experiment1/env/target.json",
+                }
+                llc_ok = False
+                llc_detail = (
+                    "LLC_COMPILE_FAIL:ERR_INTERNAL(-3): missing/invalid frozen "
+                    "target_triple in irx/experiment1/env/target.json"
+                )
+                crashes = 1
+            else:
+                llc_ok, llc_detail = _run_llc_compile(
+                    llc_path=llc_path,
+                    target_triple=target_triple,
+                    work_dir=work_dir,
+                    timeout_stage_ms=timeout_stage_ms,
+                    max_rss_mib=max_rss_mib,
+                    stage_record=runs_skeleton[4],
+                )
+                if not llc_ok:
+                    crashes = 1
+
     result_obj: dict[str, Any] = {
         "experiment": str(artifacts["constants"].get("experiment", "1")),
         "task": task,
@@ -945,7 +1144,7 @@ def run_step_a(
             },
             "policy": {
                 "ok": False,
-                "detail": loaded_artifacts_detail,
+                "detail": loaded_artifacts_detail + ";" + llc_detail,
             },
             "tests": {
                 "ok": lli_ok,

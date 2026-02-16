@@ -1,8 +1,8 @@
-# Phase 2 Runner - Step A + Step B + Step C + Step D + Step E
+# Phase 2 Runner - Step A + Step B + Step C + Step D + Step E + Step F
 
-This module provides the Phase 2 Step A..E skeleton for Experiment 1.
+This module provides the Phase 2 Step A..F skeleton for Experiment 1.
 
-Step A/Step B/Step C/Step D/Step E behavior:
+Step A/Step B/Step C/Step D/Step E/Step F behavior:
 - Loads frozen artifacts (tool snapshot, limits, schema, and test vectors).
 - Discovers candidate `.ll` deterministically using explicit `--candidate`.
 - Recovers authoritative `candidate_id` / `run_id` rules using repo evidence precedence:
@@ -42,6 +42,12 @@ Step A/Step B/Step C/Step D/Step E behavior:
     - `irx/experiment1/runs/` is excluded from discovery
     - deterministic failure detail includes searched dirs/patterns and capped inspected-file sample
   - if schema lacks explicit per-test result container, Stage 4 fails deterministically with `ERR_INTERNAL(-3)` detail in artifact
+- Adds Step F `llc_compile` gate precedence:
+  - runs only when `precheck`, `llvm_as_parse`, `opt_verify`, and `lli_tests` all pass and `work/candidate.bc` exists and is non-empty
+  - frozen `llc` path from `env/tool_versions.json` (`detected.llc.path`, fallback `detected.llvm-llc.path`)
+  - output artifact in work dir: `candidate.o`
+  - deterministic invocation: `llc -filetype=obj -mtriple=<target_triple> -O0 -o candidate.o candidate.bc`
+  - deterministic environment and resource controls reuse shared LLVM runtime helpers (`LC_ALL/LANG/TZ`, derived `LD_LIBRARY_PATH` only, RSS-only preexec)
 - Emits a schema-validated result to `irx/experiment1/runs/<candidate_id>/<run_id>.json`.
 
 No LLVM tools are executed in Step A.
