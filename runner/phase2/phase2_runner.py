@@ -453,6 +453,46 @@ def _build_llvm_tool_env(tool_path: str) -> tuple[dict[str, str], str | None]:
     return env, llvm_lib
 
 
+def _build_llvm_tool_preexec(max_rss_mib: int):
+    """Build preexec function for LLVM tools with RSS-only limits.
+
+    RLIMIT_AS is intentionally not set for LLVM tools. Only RLIMIT_RSS is
+    applied when available.
+    """
+
+    def _preexec() -> None:
+        try:
+            import resource
+
+            rss_bytes = max_rss_mib * 1024 * 1024
+            if hasattr(resource, "RLIMIT_RSS"):
+                resource.setrlimit(resource.RLIMIT_RSS, (rss_bytes, rss_bytes))
+        except Exception:
+            # Best effort per requirement.
+            pass
+
+    return _preexec
+
+
+def _prepare_llvm_tool_runtime(tool_name: str, tool_path: str, max_rss_mib: int):
+    """Shared deterministic runtime setup for LLVM tool subprocesses."""
+    env, ld_library_path = _build_llvm_tool_env(tool_path)
+    print(f"[{tool_name}] LD_LIBRARY_PATH={ld_library_path}", file=sys.stderr)
+    return env, _build_llvm_tool_preexec(max_rss_mib), ld_library_path
+
+
+def _prepare_lli_runtime(lli_path: str, max_rss_mib: int):
+    return _prepare_llvm_tool_runtime("lli", lli_path, max_rss_mib)
+
+
+def _prepare_llc_runtime(llc_path: str, max_rss_mib: int):
+    return _prepare_llvm_tool_runtime("llc", llc_path, max_rss_mib)
+
+
+def _prepare_clang_runtime(clang_path: str, max_rss_mib: int):
+    return _prepare_llvm_tool_runtime("clang", clang_path, max_rss_mib)
+
+
 def _map_signal_to_crash_type(sig_num: int) -> str | None:
     mapping = {
         signal.SIGSEGV: "SIGSEGV",
@@ -477,23 +517,7 @@ def _run_llvm_as_parse(
     if out_path.exists():
         out_path.unlink()
 
-    env, ld_library_path = _build_llvm_tool_env(llvm_as_path)
-    print(f"[llvm-as] LD_LIBRARY_PATH={ld_library_path}", file=sys.stderr)
-
-    def _preexec() -> None:
-        try:
-            import resource
-
-            rss_bytes = max_rss_mib * 1024 * 1024
-            # Note: RLIMIT_AS (virtual address space) is not applied for LLVM tools
-            # because large LLVM shared libraries (e.g., libLLVM.so.19.1 at ~123MB)
-            # require more virtual address space than max_rss_mib allows for mapping.
-            # RLIMIT_RSS (actual resident memory) is applied where available.
-            if hasattr(resource, "RLIMIT_RSS"):
-                resource.setrlimit(resource.RLIMIT_RSS, (rss_bytes, rss_bytes))
-        except Exception:
-            # Best effort per requirement.
-            pass
+    env, preexec_fn, _ = _prepare_llvm_tool_runtime("llvm-as", llvm_as_path, max_rss_mib)
 
     proc = subprocess.Popen(
         [llvm_as_path, "-o", out_name, in_name],
@@ -504,7 +528,7 @@ def _run_llvm_as_parse(
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
-        preexec_fn=_preexec,
+        preexec_fn=preexec_fn,
     )
 
     timed_out = False
@@ -593,22 +617,7 @@ def _run_opt_verify(
     max_rss_mib: int,
     stage_record: dict[str, Any],
 ) -> tuple[bool, str]:
-    env, ld_library_path = _build_llvm_tool_env(opt_path)
-    print(f"[opt] LD_LIBRARY_PATH={ld_library_path}", file=sys.stderr)
-
-    def _preexec() -> None:
-        try:
-            import resource
-
-            rss_bytes = max_rss_mib * 1024 * 1024
-            # Note: RLIMIT_AS (virtual address space) is not applied for LLVM tools
-            # because large LLVM shared libraries (e.g., libLLVM.so.19.1 at ~123MB)
-            # require more virtual address space than max_rss_mib allows for mapping.
-            # RLIMIT_RSS (actual resident memory) is applied where available.
-            if hasattr(resource, "RLIMIT_RSS"):
-                resource.setrlimit(resource.RLIMIT_RSS, (rss_bytes, rss_bytes))
-        except Exception:
-            pass
+    env, preexec_fn, _ = _prepare_llvm_tool_runtime("opt", opt_path, max_rss_mib)
 
     proc = subprocess.Popen(
         [opt_path, "-verify", "-disable-output", "candidate.bc"],
@@ -619,7 +628,7 @@ def _run_opt_verify(
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
-        preexec_fn=_preexec,
+        preexec_fn=preexec_fn,
     )
 
     timed_out = False
