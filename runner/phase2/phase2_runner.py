@@ -6,7 +6,6 @@ import json
 import os
 import signal
 import subprocess
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -119,6 +118,35 @@ def _resolve_llvm_as_path(artifacts: dict[str, Any], repo_root: Path) -> tuple[s
     if not llvm_path.is_file() or not os.access(str(llvm_path), os.X_OK):
         return None, f"llvm_as_not_executable path={path} source={source}"
     return path, f"llvm_as_executable path={path} source={source}"
+
+
+def _resolve_opt_path(artifacts: dict[str, Any], repo_root: Path) -> tuple[str | None, str]:
+    tool_versions = artifacts["tool_versions"]
+    tv_path = artifacts["tool_versions_path"]
+    source = str(tv_path.relative_to(repo_root))
+    detected = tool_versions.get("detected")
+    if not isinstance(detected, dict):
+        return None, f"opt_not_found_in_tool_versions key=detected.opt.path source={source}"
+
+    key_used = None
+    opt_entry = None
+    if isinstance(detected.get("opt"), dict):
+        key_used = "opt"
+        opt_entry = detected["opt"]
+    elif isinstance(detected.get("llvm-opt"), dict):
+        key_used = "llvm-opt"
+        opt_entry = detected["llvm-opt"]
+
+    if not isinstance(opt_entry, dict):
+        return None, f"opt_not_found_in_tool_versions key=detected.opt.path source={source}"
+
+    path = opt_entry.get("path")
+    if not isinstance(path, str) or len(path.strip()) == 0:
+        return None, f"opt_not_found_in_tool_versions key=detected.{key_used}.path source={source}"
+    p = Path(path)
+    if not p.is_file() or not os.access(str(p), os.X_OK):
+        return None, f"opt_not_executable path={path} source={source}"
+    return path, f"opt_executable path={path} source={source}"
 
 
 def _count_lines(candidate_bytes: bytes) -> int:
@@ -298,6 +326,110 @@ def _run_llvm_as_parse(
     return False, "LLVM_AS_PARSE_FAIL:parse_fail"
 
 
+def _run_opt_verify(
+    *,
+    opt_path: str,
+    work_dir: Path,
+    timeout_stage_ms: int,
+    max_rss_mib: int,
+    stage_record: dict[str, Any],
+) -> tuple[bool, str]:
+    env = {
+        "LC_ALL": "C",
+        "LANG": "C",
+        "TZ": "UTC",
+    }
+
+    def _preexec() -> None:
+        try:
+            import resource
+
+            rss_bytes = max_rss_mib * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (rss_bytes, rss_bytes))
+            if hasattr(resource, "RLIMIT_RSS"):
+                resource.setrlimit(resource.RLIMIT_RSS, (rss_bytes, rss_bytes))
+        except Exception:
+            pass
+
+    proc = subprocess.Popen(
+        [opt_path, "-verify", "-disable-output", "candidate.bc"],
+        cwd=str(work_dir),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+        preexec_fn=_preexec,
+    )
+
+    timed_out = False
+    try:
+        _, stderr = proc.communicate(timeout=timeout_stage_ms / 1000.0)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        _, stderr = proc.communicate()
+
+    rc = proc.returncode if proc.returncode is not None else -1
+    stderr_text = (stderr or "").strip()
+
+    stage_record["duration_ms"] = 0
+    stage_record["rss_mib"] = None
+
+    if timed_out:
+        stage_record["ok"] = False
+        stage_record["exit_code"] = None
+        stage_record["crash"] = {
+            "type": "TIMEOUT",
+            "signal": None,
+            "detail": f"opt_timeout ms={timeout_stage_ms}",
+        }
+        return False, "OPT_VERIFY_FAIL:timeout"
+
+    if rc == 0:
+        stage_record["ok"] = True
+        stage_record["exit_code"] = 0
+        stage_record["crash"] = None
+        return True, "OPT_VERIFY_PASS"
+
+    if rc < 0:
+        sig_num = -rc
+        mapped = _map_signal_to_crash_type(sig_num)
+        if mapped is not None:
+            stage_record["ok"] = False
+            stage_record["exit_code"] = None
+            stage_record["crash"] = {
+                "type": mapped,
+                "signal": sig_num,
+                "detail": f"opt terminated by signal {sig_num}",
+            }
+            return False, f"OPT_VERIFY_FAIL:signal_{sig_num}"
+
+    lower_err = stderr_text.lower()
+    if "out of memory" in lower_err or "cannot allocate memory" in lower_err:
+        stage_record["ok"] = False
+        stage_record["exit_code"] = rc if rc >= 0 else None
+        stage_record["crash"] = {
+            "type": "OOM",
+            "signal": None if rc >= 0 else -rc,
+            "detail": "opt reported memory exhaustion",
+        }
+        return False, "OPT_VERIFY_FAIL:oom"
+
+    stage_record["ok"] = False
+    stage_record["exit_code"] = rc if rc >= 0 else None
+    stage_record["crash"] = {
+        "type": "VERIFY_FAIL",
+        "signal": None if rc >= 0 else -rc,
+        "detail": f"opt_verify_failed exit_code={rc}",
+    }
+    return False, "OPT_VERIFY_FAIL:verify_fail"
+
+
 def run_step_a(
     repo_root: Path,
     task: str,
@@ -375,6 +507,39 @@ def run_step_a(
                 stage_record=runs_skeleton[1],
             )
 
+    opt_ok = False
+    candidate_bc_path = work_dir / "candidate.bc"
+    stage3_can_run = (
+        precheck_ok
+        and llvm_as_ok
+        and candidate_bc_path.is_file()
+        and candidate_bc_path.stat().st_size > 0
+    )
+    if not stage3_can_run:
+        opt_detail = "OPT_VERIFY_NOT_RUN:preconditions_failed"
+    else:
+        opt_path, opt_path_detail = _resolve_opt_path(artifacts, repo_root)
+        if opt_path is None:
+            runs_skeleton[2]["ok"] = False
+            runs_skeleton[2]["exit_code"] = None
+            runs_skeleton[2]["duration_ms"] = 0
+            runs_skeleton[2]["rss_mib"] = None
+            runs_skeleton[2]["crash"] = {
+                "type": "POLICY_VIOLATION",
+                "signal": None,
+                "detail": opt_path_detail,
+            }
+            opt_ok = False
+            opt_detail = f"OPT_VERIFY_FAIL:{opt_path_detail}"
+        else:
+            opt_ok, opt_detail = _run_opt_verify(
+                opt_path=opt_path,
+                work_dir=work_dir,
+                timeout_stage_ms=timeout_stage_ms,
+                max_rss_mib=max_rss_mib,
+                stage_record=runs_skeleton[2],
+            )
+
     result_obj: dict[str, Any] = {
         "experiment": str(artifacts["constants"].get("experiment", "1")),
         "task": task,
@@ -390,8 +555,8 @@ def run_step_a(
                 "detail": loaded_artifacts_detail + ";" + precheck_detail + ";" + llvm_as_detail,
             },
             "verify": {
-                "ok": False,
-                "detail": loaded_artifacts_detail,
+                "ok": opt_ok,
+                "detail": loaded_artifacts_detail + ";" + opt_detail,
             },
             "policy": {
                 "ok": False,
@@ -410,7 +575,7 @@ def run_step_a(
             "ret_mismatches": 0,
             "output_mismatches": 0,
             "timeouts": 0,
-            "crashes": 0 if (precheck_ok and llvm_as_ok) else 1,
+            "crashes": 0 if (precheck_ok and llvm_as_ok and opt_ok) else 1,
         },
         "verdict": "ERROR",
     }

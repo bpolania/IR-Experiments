@@ -1,8 +1,8 @@
-# Phase 2 Runner - Step A + Step B + Step C
+# Phase 2 Runner - Step A + Step B + Step C + Step D
 
 This module provides the Phase 2 Step A skeleton for Experiment 1.
 
-Step A/Step B/Step C behavior:
+Step A/Step B/Step C/Step D behavior:
 - Loads frozen artifacts (tool snapshot, limits, schema, and test vectors).
 - Discovers candidate `.ll` deterministically using explicit `--candidate`.
 - Recovers authoritative `candidate_id` / `run_id` rules using repo evidence precedence:
@@ -23,6 +23,11 @@ Step A/Step B/Step C behavior:
   - tool path: `env/tool_versions.json` → `detected.llvm-as.path`
   - limits: `harness/constants.json` → `limits.timeout_stage_ms`, `limits.max_rss_mib`
   - invocation in work dir: `llvm-as -o candidate.bc candidate.ll`
+  - deterministic environment: `LC_ALL=C`, `LANG=C`, `TZ=UTC`
+- Executes Step D `opt -verify` gate (only if precheck + parse succeeded and `candidate.bc` exists):
+  - tool path: `env/tool_versions.json` → `detected.opt.path` (or `detected.llvm-opt.path` if present)
+  - limits: `harness/constants.json` → `limits.timeout_stage_ms`, `limits.max_rss_mib`
+  - invocation in work dir: `opt -verify -disable-output candidate.bc`
   - deterministic environment: `LC_ALL=C`, `LANG=C`, `TZ=UTC`
 - Emits a schema-validated result to `irx/experiment1/runs/<candidate_id>/<run_id>.json`.
 
@@ -71,4 +76,10 @@ Run parse-fail case (invalid IR syntax):
 
 ```bash
 python3 runner/phase2/phase2_runner.py --candidate /tmp/cand_invalid.ll
+```
+
+Run verify-fail case (IR that parses but fails `opt -verify`):
+
+```bash
+python3 runner/phase2/phase2_runner.py --candidate /tmp/cand_verify_fail.ll
 ```
