@@ -1,0 +1,10 @@
+{
+  "candidate_id": {
+    "algo": "sha256_file_bytes",
+    "input": "candidate.ll"
+  },
+  "run_id": {
+    "algo": "sha256_utf8",
+    "input": "candidate_id"
+  }
+}

@@ -70,6 +70,7 @@ The runner is artifact-first: even when a gate fails (missing tool, parse/verify
 The repository groups experiment work under `irx/`, with each experiment in its own directory.
 
 - `irx/experiment1/` — Experiment 1 workspace, including environment metadata, task definitions, harness artifacts, and experiment-specific documentation.
+- `irx/experiment1/harness/id_rules.json` — Frozen authoritative candidate/run ID derivation rules for Experiment 1.
 - `irx/experiment1/env/` — Target and toolchain capture artifacts.
 - `irx/experiment1/tasks/` — Task specs and test vectors.
 - `irx/experiment1/harness/` — Shared constants, schemas, and phase scripts.

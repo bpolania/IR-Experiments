@@ -20,6 +20,12 @@ Execution logic is intentionally not implemented yet.
 - Task specs and vectors: `tasks/*/spec.json`, `tasks/*/tests.json`
 - Result shape contract: `harness/result_schema.json`
 
+## ID Derivation (Frozen)
+
+Authoritative ID rules are frozen in `harness/id_rules.json`:
+- `candidate_id = sha256(candidate.ll bytes).hexdigest()`
+- `run_id = sha256(candidate_id UTF-8).hexdigest()`
+
 ## Phase 1: Toolchain Discovery and Environment Capture
 
 Phase 1 adds deterministic local toolchain discovery and canonical run-configuration capture.

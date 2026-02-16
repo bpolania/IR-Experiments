@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
 
 from lib.authority_probe import (
+    ProbeSummary,
     collect_existing_runs,
     compute_candidate_id_by_algo,
     compute_run_id_by_formula,
@@ -14,6 +16,47 @@ from lib.authority_probe import (
 
 class FrozenIdRuleMissingError(RuntimeError):
     pass
+
+
+def _load_frozen_id_rules_if_present(artifacts: dict[str, Any], repo_root: Path) -> dict[str, Any] | None:
+    path = artifacts["exp_root"] / "harness" / "id_rules.json"
+    rel = str(path.relative_to(repo_root))
+    if not path.exists():
+        return None
+
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise FrozenIdRuleMissingError(
+            f"ERR_INTERNAL(-3): malformed {rel}: invalid JSON ({type(exc).__name__})"
+        )
+
+    expected = {
+        "candidate_id": {"algo": "sha256_file_bytes", "input": "candidate.ll"},
+        "run_id": {"algo": "sha256_utf8", "input": "candidate_id"},
+    }
+    if not isinstance(obj, dict):
+        raise FrozenIdRuleMissingError(f"ERR_INTERNAL(-3): malformed {rel}: top-level object required")
+    if set(obj.keys()) != set(expected.keys()):
+        raise FrozenIdRuleMissingError(
+            f"ERR_INTERNAL(-3): malformed {rel}: expected keys candidate_id,run_id only"
+        )
+    for top_key in ("candidate_id", "run_id"):
+        val = obj.get(top_key)
+        if not isinstance(val, dict):
+            raise FrozenIdRuleMissingError(
+                f"ERR_INTERNAL(-3): malformed {rel}: {top_key} must be object"
+            )
+        if set(val.keys()) != {"algo", "input"}:
+            raise FrozenIdRuleMissingError(
+                f"ERR_INTERNAL(-3): malformed {rel}: {top_key} must contain only algo,input"
+            )
+        if val != expected[top_key]:
+            raise FrozenIdRuleMissingError(
+                f"ERR_INTERNAL(-3): malformed {rel}: unexpected value for {top_key}"
+            )
+
+    return {"path": path, "rules": obj}
 
 
 def _extract_explicit_rule_markers(text: str) -> tuple[str | None, str | None]:
@@ -50,6 +93,33 @@ def _find_explicit_rules(artifacts: dict[str, Any], repo_root: Path) -> tuple[st
 
 
 def resolve_id_authority(artifacts: dict[str, Any], repo_root: Path) -> dict[str, Any]:
+    frozen = _load_frozen_id_rules_if_present(artifacts, repo_root)
+    if frozen is not None:
+        rules_path = frozen["path"]
+        summary = ProbeSummary(
+            total_runs_scanned=0,
+            usable_runs_with_candidate_bytes=0,
+            runs_skipped_missing_candidate_bytes=0,
+            skipped_runs=[],
+            inference_status="SKIPPED_FROZEN_ID_RULES",
+            counterexample_detail=None,
+        )
+        return {
+            "explicit_candidate_rule": "candidate_id=sha256(candidate.ll bytes) from harness/id_rules.json",
+            "explicit_run_rule": "run_id=sha256(candidate_id utf8) from harness/id_rules.json",
+            "searched_paths": [str(rules_path.relative_to(repo_root))],
+            "records_count": 0,
+            "candidate_algo": "sha256",
+            "run_formula": "sha256(candidate_id_utf8)",
+            "candidate_reason": (
+                "candidate_id frozen by harness/id_rules.json: sha256(candidate.ll bytes)"
+            ),
+            "run_reason": (
+                "run_id frozen by harness/id_rules.json: sha256(candidate_id utf8)"
+            ),
+            "probe_summary": summary,
+        }
+
     explicit_candidate_rule, explicit_run_rule, searched = _find_explicit_rules(artifacts, repo_root)
     artifact_blobs = [
         artifacts["raw"]["tool_versions"],
