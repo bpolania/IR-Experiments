@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -416,6 +417,42 @@ def _apply_precheck(
     return True, f"PRECHECK_PASS:bytes={byte_count}/{max_bytes};lines={line_count}/{max_lines}"
 
 
+def _derive_llvm_lib_path(tool_path: str) -> str | None:
+    """Derive LLVM lib directory from frozen tool path.
+
+    Given a frozen tool path like /usr/lib/llvm-19/bin/llvm-as,
+    derive the lib directory as /usr/lib/llvm-19/lib.
+
+    Returns the lib path if it exists as a directory, otherwise None.
+    """
+    tool_p = Path(tool_path)
+    # tool_path = /usr/lib/llvm-19/bin/llvm-as
+    # parent = /usr/lib/llvm-19/bin
+    # llvm_root = /usr/lib/llvm-19
+    llvm_root = tool_p.parent.parent
+    llvm_lib = llvm_root / "lib"
+    if llvm_lib.is_dir():
+        return str(llvm_lib)
+    return None
+
+
+def _build_llvm_tool_env(tool_path: str) -> tuple[dict[str, str], str | None]:
+    """Build deterministic subprocess environment for LLVM tool invocation.
+
+    Returns (env_dict, ld_library_path_used).
+    ld_library_path_used is the derived path if set, otherwise None.
+    """
+    env = {
+        "LC_ALL": "C",
+        "LANG": "C",
+        "TZ": "UTC",
+    }
+    llvm_lib = _derive_llvm_lib_path(tool_path)
+    if llvm_lib is not None:
+        env["LD_LIBRARY_PATH"] = llvm_lib
+    return env, llvm_lib
+
+
 def _map_signal_to_crash_type(sig_num: int) -> str | None:
     mapping = {
         signal.SIGSEGV: "SIGSEGV",
@@ -440,18 +477,18 @@ def _run_llvm_as_parse(
     if out_path.exists():
         out_path.unlink()
 
-    env = {
-        "LC_ALL": "C",
-        "LANG": "C",
-        "TZ": "UTC",
-    }
+    env, ld_library_path = _build_llvm_tool_env(llvm_as_path)
+    print(f"[llvm-as] LD_LIBRARY_PATH={ld_library_path}", file=sys.stderr)
 
     def _preexec() -> None:
         try:
             import resource
 
             rss_bytes = max_rss_mib * 1024 * 1024
-            resource.setrlimit(resource.RLIMIT_AS, (rss_bytes, rss_bytes))
+            # Note: RLIMIT_AS (virtual address space) is not applied for LLVM tools
+            # because large LLVM shared libraries (e.g., libLLVM.so.19.1 at ~123MB)
+            # require more virtual address space than max_rss_mib allows for mapping.
+            # RLIMIT_RSS (actual resident memory) is applied where available.
             if hasattr(resource, "RLIMIT_RSS"):
                 resource.setrlimit(resource.RLIMIT_RSS, (rss_bytes, rss_bytes))
         except Exception:
@@ -556,18 +593,18 @@ def _run_opt_verify(
     max_rss_mib: int,
     stage_record: dict[str, Any],
 ) -> tuple[bool, str]:
-    env = {
-        "LC_ALL": "C",
-        "LANG": "C",
-        "TZ": "UTC",
-    }
+    env, ld_library_path = _build_llvm_tool_env(opt_path)
+    print(f"[opt] LD_LIBRARY_PATH={ld_library_path}", file=sys.stderr)
 
     def _preexec() -> None:
         try:
             import resource
 
             rss_bytes = max_rss_mib * 1024 * 1024
-            resource.setrlimit(resource.RLIMIT_AS, (rss_bytes, rss_bytes))
+            # Note: RLIMIT_AS (virtual address space) is not applied for LLVM tools
+            # because large LLVM shared libraries (e.g., libLLVM.so.19.1 at ~123MB)
+            # require more virtual address space than max_rss_mib allows for mapping.
+            # RLIMIT_RSS (actual resident memory) is applied where available.
             if hasattr(resource, "RLIMIT_RSS"):
                 resource.setrlimit(resource.RLIMIT_RSS, (rss_bytes, rss_bytes))
         except Exception:
