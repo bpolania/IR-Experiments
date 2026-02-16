@@ -108,10 +108,44 @@
         "crashes": {
           "type": "integer",
           "minimum": 0
+        },
+        "native_tests_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "native_tests_passed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "native_tests_failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "native_ret_mismatches": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "native_output_mismatches": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "native_timeouts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "native_crashes": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
     "test_results": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/testResult"
+      }
+    },
+    "native_test_results": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/testResult"

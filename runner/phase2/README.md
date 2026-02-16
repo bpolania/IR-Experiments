@@ -1,8 +1,8 @@
-# Phase 2 Runner - Step A + Step B + Step C + Step D + Step E + Step F + Step G
+# Phase 2 Runner - Steps A through H
 
-This module provides the Phase 2 Step A..G skeleton for Experiment 1.
+This module provides the Phase 2 Step A..H runner for Experiment 1.
 
-Step A/Step B/Step C/Step D/Step E/Step F/Step G behavior:
+Step A/Step B/Step C/Step D/Step E/Step F/Step G/Step H behavior:
 - Loads frozen artifacts (tool snapshot, limits, schema, and test vectors).
 - Discovers candidate `.ll` deterministically using explicit `--candidate`.
 - Recovers authoritative `candidate_id` / `run_id` rules using repo evidence precedence:
@@ -60,7 +60,24 @@ Step A/Step B/Step C/Step D/Step E/Step F/Step G behavior:
     - `-Wl,-e,f`: entry point set to `f` symbol
   - deterministic environment and resource controls reuse shared LLVM runtime helpers (`LC_ALL/LANG/TZ`, derived `LD_LIBRARY_PATH` only, RSS-only preexec via `_prepare_clang_runtime`)
   - failure mapping identical to `llc_compile`: TIMEOUT, OOM heuristic, signal mapping, POLICY_VIOLATION for nonzero exit or missing/empty output
-  - Step H (`native_tests`) remains NOT_RUN
+- Adds Step H `native_tests` gate precedence:
+  - runs only when all prior stages (precheck through clang_link) pass and `work/candidate.exe` exists and is non-empty
+  - native harness: `irx/experiment1/harness/native/native_runner.c`
+    - minimal C program with in-process ELF loader (no dlopen — candidate.exe is freestanding)
+    - parses ELF64 headers, maps PT_LOAD segments, finds `f` in `.symtab`, calls via function pointer
+    - prints `RET=<i64>` and `OUT=<hex>` lines (same protocol as lli shim)
+    - `--selftest` mode for hex roundtrip validation
+    - dependencies: libc only (no libelf, no LLVM)
+  - harness build: deterministic, using frozen clang path with `-fuse-ld=lld`
+    - build command: `clang -O2 -Wall -Wextra -Werror -std=c11 -fno-omit-frame-pointer -fuse-ld=lld -o native_runner native_runner.c`
+    - cached: skips rebuild if binary is newer than source
+    - selftest executed after build (or cache hit) to validate harness integrity
+  - per-test execution: spawns `native_runner <candidate.exe> <in_hex> <out_cap> f` per vector
+    - env: `LC_ALL=C`, `LANG=C`, `TZ=UTC` (no LD_LIBRARY_PATH — harness uses only libc)
+    - timeout: `limits.timeout_per_test_ms` per test
+    - outcome categories match lli_tests: PASS, RETURN_MISMATCH, OUTPUT_MISMATCH, UNEXPECTED_CRASH, TIMEOUT
+  - results stored in `native_test_results` array (same testResult schema as `test_results`)
+  - native metrics in `metrics`: `native_tests_total`, `native_tests_passed`, `native_tests_failed`, etc.
 - Emits a schema-validated result to `irx/experiment1/runs/<candidate_id>/<run_id>.json`.
 
 No LLVM tools are executed in Step A.

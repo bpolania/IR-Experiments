@@ -11,11 +11,13 @@
 
 This report documents the complete Phase 2 lifecycle for Experiment 1 on
 Raspberry Pi 5. The project progressed from a non-functional runner that
-could not even load the LLVM shared library, through six incremental
+could not even load the LLVM shared library, through eight incremental
 verification rounds, to a fully operational pipeline that compiles a
-correct LLVM IR candidate into a native aarch64 ELF executable.
+correct LLVM IR candidate into a native aarch64 ELF executable and
+executes it against frozen test vectors with bitwise-identical results
+between the LLVM interpreter and native execution.
 
-Seven generations of work:
+Eight generations of work:
 
 1. **Initial** — llvm-as failed at runtime: missing `LD_LIBRARY_PATH` in the
    cleared subprocess environment and an overly restrictive `RLIMIT_AS`
@@ -44,12 +46,19 @@ Seven generations of work:
    `_start`), so the link uses `-nostdlib -fuse-ld=lld -Wl,--no-dynamic-linker
    -Wl,-e,f` to produce a freestanding binary with `f` as its entry point.
    Verified on Pi: `candidate.exe` produced (2 304 bytes), deterministic
-   across runs. Step H (`native_tests`) remains NOT_RUN.
+   across runs.
+8. **Step H implementation** — `native_tests` stage wired into the runner.
+   A minimal C harness (`native_runner.c`) loads the freestanding ELF
+   in-process, finds the `f` symbol in `.symtab`, and calls it with the same
+   frozen test vectors used by `lli_tests`. All 10 native tests pass and
+   produce bitwise-identical results to the interpreter. The full A-H
+   pipeline is verified end-to-end.
 
-**Final status**: Phase 2 verified end-to-end through Step G (clang_link).
+**Final status**: Phase 2 verified end-to-end through Step H (native_tests).
 The pipeline accepts a `.ll` candidate, validates it, runs it against frozen
-test vectors under lli, compiles it to a native object file, and links it
-into an executable. Step H (native_tests) remains the sole unwired stage.
+test vectors under lli, compiles it to a native object file, links it into
+an executable, and executes it natively — all seven stages PASS. The lli
+and native test results agree on all 10 vectors.
 
 ---
 
@@ -73,7 +82,7 @@ Results are recorded in a schema-validated JSON artifact under
 | 3 | `lli_tests` | `/usr/lib/llvm-19/bin/lli` + harness | opt_verify.ok, harness resolved, task vectors loaded |
 | 4 | `llc_compile` | `/usr/lib/llvm-19/bin/llc` | lli_tests.ok, candidate.bc exists |
 | 5 | `clang_link` | `/usr/lib/llvm-19/bin/clang` | llc_compile.ok, candidate.o exists |
-| 6 | `native_tests` | native binary | clang_link.ok (not yet wired) |
+| 6 | `native_tests` | native harness binary | clang_link.ok, candidate.exe exists |
 
 Each stage either executes and records its result, or is marked NOT_RUN:
 
@@ -107,6 +116,10 @@ The `clang_link` stage additionally uses `-fuse-ld=lld` to ensure clang
 finds its colocated LLD linker without requiring `PATH` in the environment.
 This is necessary because clang, unlike the other LLVM tools, spawns a
 child linker process and needs to locate it.
+
+The `native_tests` stage uses an even more minimal environment: only
+`LC_ALL=C`, `LANG=C`, `TZ=UTC` — no `LD_LIBRARY_PATH` needed because the
+native harness binary depends only on libc.
 
 ### 2.5 Resource Limits
 
@@ -143,7 +156,7 @@ confirmation (`aarch64-unknown-linux-gnu`).
 | `max_instructions` | 20 000 | reserved |
 | `max_alloca_bytes_total` | 4 096 | reserved |
 | `timeout_stage_ms` | 1 000 | llvm_as, opt, llc, clang |
-| `timeout_per_test_ms` | 50 | lli_tests |
+| `timeout_per_test_ms` | 50 | lli_tests, native_tests |
 | `max_rss_mib` | 64 | all tool stages |
 | `max_input_bytes` | 65 536 | reserved |
 | `max_output_bytes` | 65 536 | reserved |
@@ -173,9 +186,18 @@ Note: the key is `triple`, not `target_triple`. The runner accepts both
 
 Required top-level keys: `experiment`, `task`, `candidate_id`, `run_id`,
 `timestamps`, `gates`, `runs`, `metrics`, `verdict`. Optional `test_results`
-array of `$defs.testResult` objects with per-test fields: `index`, `in_hex`,
-`out_cap`, `expected_ret`, `expected_out_hex`, `actual_ret`, `actual_out_hex`,
-`outcome`, `exit_code`, `signal`, `detail`.
+array and optional `native_test_results` array, both of `$defs.testResult`
+objects with per-test fields: `index`, `in_hex`, `out_cap`, `expected_ret`,
+`expected_out_hex`, `actual_ret`, `actual_out_hex`, `outcome`, `exit_code`,
+`signal`, `detail`.
+
+The schema was extended in Step H to add seven optional native metric fields
+to the `metrics` object (`native_tests_total`, `native_tests_passed`,
+`native_tests_failed`, `native_ret_mismatches`, `native_output_mismatches`,
+`native_timeouts`, `native_crashes`) and the `native_test_results` array.
+All native fields are optional — the schema uses `additionalProperties: false`,
+so explicit addition was required. Existing fields and required lists are
+unchanged.
 
 ### 3.6 ABI Harness
 
@@ -189,7 +211,18 @@ in a clean environment (`LC_ALL=C LANG=C TZ=UTC`), parses the shim's
 `RET=`/`OUT=` stdout lines, and emits a single JSON object with keys `ok`,
 `exit_code`, `signal`, `ret_i64`, `out_hex`, `detail`.
 
-### 3.7 Test Vectors
+### 3.7 Native Harness
+
+- Source: `harness/native/native_runner.c`
+- Compiled binary: `harness/native/native_runner` (built deterministically by the runner)
+- Protocol: identical to lli shim — prints `RET=<signed decimal i64>` and `OUT=<lowercase hex bytes>`
+- Dependencies: libc only (no dlopen, no libelf, no LLVM)
+
+The native harness is a minimal C program that loads a freestanding aarch64
+ELF executable in-process, finds the `f` symbol in `.symtab`, and calls it
+via function pointer. See section 10 for detailed design.
+
+### 3.8 Test Vectors
 
 | Task | File | Vectors |
 |------|------|---------|
@@ -465,9 +498,7 @@ stage6_can_run = (
 Resolves clang path and target triple independently (same `_resolve_target_triple`
 used by llc_compile). Updates `gates.policy.detail` to include `clang_detail`.
 
-### 9.3 Verification Results
-
-Full pipeline run with the known-good candidate:
+### 9.3 Verification Results (through Step G)
 
 | Stage | ok | exit_code | Notes |
 |-------|----|-----------|-------|
@@ -479,45 +510,7 @@ Full pipeline run with the known-good candidate:
 | clang_link | true | 0 | candidate.exe = 2 304 bytes |
 | native_tests | false | — | NOT_RUN |
 
-### 9.4 Work Artifacts (through Step G)
-
-| File | Size | Format |
-|------|------|--------|
-| `work/candidate.ll` | 1 232 bytes | LLVM IR text |
-| `work/candidate.bc` | 1 928 bytes | LLVM bitcode |
-| `work/candidate.o` | 1 008 bytes | aarch64 ELF relocatable |
-| `work/candidate.exe` | 2 304 bytes | aarch64 ELF executable (static) |
-
-### 9.5 clang Invocation Detail
-
-```
-clang_path:      /usr/lib/llvm-19/bin/clang (from tool_versions.json, key "detected.clang")
-target_triple:   aarch64-unknown-linux-gnu (from target.json, key "triple")
-linker:          /usr/lib/llvm-19/bin/ld.lld (colocated, selected via -fuse-ld=lld)
-command:         clang -target aarch64-unknown-linux-gnu -fuse-ld=lld -nostdlib
-                       -Wl,--no-dynamic-linker -Wl,-e,f -o candidate.exe candidate.o
-environment:     LC_ALL=C LANG=C TZ=UTC LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
-preexec:         RLIMIT_RSS=64 MiB (RLIMIT_AS not set)
-stderr:          [clang] LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
-```
-
-### 9.6 Executable Properties
-
-The produced `candidate.exe` is a minimal static ELF:
-- No dynamic linker (no PT_INTERP segment)
-- No CRT objects linked (no `_start`, no `__libc_start_main`)
-- Entry point is the `f` symbol directly
-- No shared library dependencies
-- Suitable for Step H native testing (the harness will call `f` directly
-  or set up the appropriate calling convention)
-
-### 9.7 Determinism
-
-Two runs with clean artifact directory between each produced identical:
-- `candidate_id`: `de499765dfe2e94002b34a27d113273ffe5c4345c6463f665f87cc5b2fb610b6`
-- `run_id`: `4254c62717bfc6fbabf0ca1cf107b9519e030649890ea8b3d8acf9c9367f5d60`
-
-### 9.8 PATH-less Linker Discovery
+### 9.4 PATH-less Linker Discovery
 
 During initial Step G testing, clang failed with:
 
@@ -537,20 +530,251 @@ no-PATH environment used by all other stages.
 
 ---
 
-## 10 Metrics Summary (Known-Good Candidate)
+## 10 Generation 7: Step H Implemented — native_tests Verifies End-to-End
+
+### 10.1 Design Challenge
+
+The `candidate.exe` produced by Step G is a freestanding ELF with no dynamic
+linker, no CRT, and `f` as its entry point. Standard `dlopen`/`dlsym` cannot
+be used because the `f` symbol exists only in `.symtab`, not in `.dynsym`
+(which has only the null entry). A custom loader was required.
+
+### 10.2 Native Harness Design (`harness/native/native_runner.c`)
+
+The native harness is a 421-line C program with the following components:
+
+**Hex utilities** — `hex_decode()` and `hex_encode()` functions for converting
+between binary data and lowercase hex strings. Used for both input decoding
+and output encoding, matching the lli shim's protocol.
+
+**Self-test** — `--selftest` mode validates hex roundtrip correctness:
+- Encode/decode of `"0123456789abcdef"`
+- Empty string roundtrip
+- Odd-length hex rejection
+
+**Minimal ELF64 loader** (`load_elf()`) — Loads a freestanding aarch64 ELF
+executable into the current process:
+
+1. Maps the file read-only for header parsing
+2. Validates ELF magic, class (ELF64), endianness (LSB), machine (aarch64)
+3. Accepts both `ET_EXEC` and `ET_DYN` (PIE) ELF types
+4. Computes the virtual address extent across all `PT_LOAD` segments
+5. Reserves an anonymous memory region for the full extent
+6. Copies each `PT_LOAD` segment's file data into the region, zeroing BSS
+7. Flushes instruction cache via `__builtin___clear_cache` (aarch64 requirement:
+   the data cache and instruction cache are not coherent, so newly loaded code
+   must be made visible to the instruction fetch unit)
+8. Sets per-segment memory protections (`mprotect`) based on `p_flags`
+9. Checks for relocations and fails closed if any are present (the candidate
+   is fully PIC with no relocations needed)
+10. Looks up the requested symbol in `.symtab` by iterating `SHT_SYMTAB`
+    entries and comparing names via the linked string table
+11. Falls back to the ELF entry point if the symbol is `"f"` and `.symtab`
+    lookup fails
+
+**Invocation** — Casts the resolved function pointer to the candidate ABI
+signature `int64_t (*)(uint8_t*, int32_t, uint8_t*, int32_t)` and calls it
+directly. Prints `RET=<signed i64>` and `OUT=<lowercase hex>` to stdout
+(same protocol as the lli shim).
+
+**Safety properties**:
+- Validates all ELF structure offsets against file size before dereferencing
+- Caps input/output buffers at 65 536 bytes (matching `constants.json`)
+- Fails closed on relocations (which would require a runtime linker)
+- Exit code 0 for all semantic results (including errors); nonzero only for
+  usage errors
+
+### 10.3 Harness Build Process
+
+The runner builds the native harness deterministically using the frozen clang
+path:
 
 ```
-tests_total:        10
-tests_passed:       10
-tests_failed:        0
-ret_mismatches:      0
-output_mismatches:   0
-timeouts:            0
-crashes:             0
-test_results count: 10
+clang -O2 -Wall -Wextra -Werror -std=c11 -fno-omit-frame-pointer -fuse-ld=lld -o native_runner native_runner.c
 ```
 
-### 10.1 Artifact IDs (deterministic)
+Key properties:
+- Uses the same frozen clang from `tool_versions.json` as `clang_link`
+- `-fuse-ld=lld` avoids PATH dependency (same rationale as Step G)
+- `-Werror` ensures no warnings are silently ignored
+- Build is cached: skips recompilation if the binary is newer than the source
+- After build (or cache hit), a `--selftest` invocation validates the harness
+  before any candidate tests are run
+- Build failure or selftest failure causes `native_tests` to be recorded as
+  a failure with appropriate detail, not a crash
+
+### 10.4 Runner Integration
+
+Five functions added to `runner/phase2/phase2_runner.py`:
+
+**`_resolve_native_harness_source(repo_root)`** — Finds the harness C source
+at `irx/experiment1/harness/native/native_runner.c`. Returns `(path, detail)`
+or `(None, error_detail)`.
+
+**`_ensure_native_harness_built(...)`** — Builds the harness using frozen
+clang, caches the result, runs selftest. Returns
+`(success, harness_binary_path, detail)`.
+
+**`_parse_native_runner_output(stdout_text)`** — Parses the `RET=`/`OUT=`
+protocol lines from the harness stdout. Returns a dict with `ok`, `ret_i64`,
+`out_hex`, `detail`. Normalizes hex output to lowercase.
+
+**`_run_single_native_test(...)`** — Spawns the harness for one test vector:
+`native_runner <candidate.exe> <in_hex> <out_cap> f`. Uses minimal environment
+(`LC_ALL=C LANG=C TZ=UTC`), enforces `timeout_per_test_ms` per test.
+
+**`_run_native_tests(...)`** — Iterates all frozen test vectors, collects
+per-test results into a `native_test_results` array, computes aggregate
+metrics. Mirrors the structure of `_run_lli_tests` exactly.
+
+**Stage 7 execution block** — Gated on:
+
+```python
+stage7_can_run = (
+    precheck_ok and llvm_as_ok and opt_ok and lli_ok
+    and llc_ok and clang_ok
+    and candidate_exe_path.is_file()
+    and candidate_exe_path.stat().st_size > 0
+)
+```
+
+### 10.5 Schema Extension
+
+The frozen result schema was extended with backward-compatible additions:
+
+- `native_test_results`: optional array of `$defs.testResult` objects (same
+  schema as `test_results`)
+- Seven optional metrics: `native_tests_total`, `native_tests_passed`,
+  `native_tests_failed`, `native_ret_mismatches`, `native_output_mismatches`,
+  `native_timeouts`, `native_crashes`
+
+All new fields are optional. The `required` lists are unchanged. Pre-Step-H
+result artifacts remain valid against the updated schema.
+
+### 10.6 Per-Test Outcome Categories
+
+Native test outcomes use the same categories as lli tests:
+
+| Outcome | Condition |
+|---------|-----------|
+| PASS | `actual_ret == expected_ret` and `actual_out_hex == expected_out_hex` |
+| RETURN_MISMATCH | Return value differs from expected |
+| OUTPUT_MISMATCH | Return value matches but output hex differs |
+| UNEXPECTED_CRASH | Harness subprocess was killed by signal |
+| TIMEOUT | Harness subprocess exceeded `timeout_per_test_ms` |
+
+### 10.7 Full Pipeline Results (through Step H)
+
+| Stage | ok | exit_code | Notes |
+|-------|----|-----------|-------|
+| precheck | true | — | bytes=1232/65536, lines=42/2000 |
+| llvm_as_parse | true | 0 | candidate.bc produced |
+| opt_verify | true | 0 | `-passes=verify` pass |
+| lli_tests | true | 0 | 10/10 pass, 0 failures |
+| llc_compile | true | 0 | candidate.o = 1 008 bytes |
+| clang_link | true | 0 | candidate.exe = 2 304 bytes |
+| native_tests | true | 0 | 10/10 pass, 0 failures |
+
+### 10.8 lli vs. Native Result Agreement
+
+All 10 test vectors produce bitwise-identical results between the LLVM
+interpreter (`lli`) and native execution:
+
+| Vector | lli ret | native ret | lli out | native out | Match |
+|--------|---------|------------|---------|------------|-------|
+| t01 | 4 | 4 | 00000000 | 00000000 | yes |
+| t02 | 4 | 4 | 01000000 | 01000000 | yes |
+| t03 | 4 | 4 | ffffffff | ffffffff | yes |
+| t04 | 4 | 4 | 03000000 | 03000000 | yes |
+| t05 | 4 | 4 | 00000000 | 00000000 | yes |
+| t06 | 4 | 4 | 78563412 | 78563412 | yes |
+| t07 | 4 | 4 | 00000000 | 00000000 | yes |
+| t08 | 4 | 4 | feffffff | feffffff | yes |
+| t09 | -1 | -1 | | | yes |
+| t10 | 4 | 4 | 0a000000 | 0a000000 | yes |
+
+This confirms that the candidate's behavior under interpretation and under
+native compilation on aarch64 are equivalent across the entire test surface.
+
+### 10.9 Work Artifacts (through Step H)
+
+| File | Size | Format |
+|------|------|--------|
+| `work/candidate.ll` | 1 232 bytes | LLVM IR text |
+| `work/candidate.bc` | 1 928 bytes | LLVM bitcode |
+| `work/candidate.o` | 1 008 bytes | aarch64 ELF relocatable |
+| `work/candidate.exe` | 2 304 bytes | aarch64 ELF executable (freestanding) |
+| `harness/native/native_runner` | 13 064 bytes | aarch64 ELF executable (harness) |
+
+### 10.10 ELF Structure of candidate.exe
+
+The candidate executable has the following structure (examined via `readelf`):
+
+- Type: `ET_DYN` (Position-Independent Executable / shared object)
+- Machine: `EM_AARCH64`
+- Entry point: `f` symbol
+- 3 `PT_LOAD` segments (code, data, dynamic)
+- No relocations (fully PIC)
+- Symbol `f` present in `.symtab` (not in `.dynsym`)
+- `DYNAMIC` segment with minimal entries
+- No external library dependencies
+
+The `ET_DYN` type (rather than `ET_EXEC`) is a consequence of LLD's default
+behavior for PIE. The native harness handles both `ET_DYN` and `ET_EXEC`.
+
+### 10.11 Unit Tests
+
+13 hermetic unit tests in `runner/phase2/tests/test_native_tests.py`:
+
+**TestParseNativeRunnerOutput** (8 tests):
+- `test_ok_with_ret_and_out` — standard success case
+- `test_negative_ret_empty_out` — negative return value
+- `test_missing_ret_line` — missing `RET=` line
+- `test_missing_out_line_defaults_empty` — missing `OUT=` line defaults to empty
+- `test_invalid_ret_format` — non-integer `RET=` value
+- `test_empty_stdout` — completely empty output
+- `test_err_internal_ret` — `RET=-3` (ERR_INTERNAL)
+- `test_out_hex_uppercase_normalized` — uppercase hex normalized to lowercase
+
+**TestResolveNativeHarnessSource** (1 test):
+- `test_missing_source_returns_none` — nonexistent path returns None
+
+**TestNativeTestsGating** (3 tests):
+- `test_runs_skeleton_has_native_tests_stage` — skeleton includes 7th stage
+- `test_gate_requires_all_prior_stages` — gate fails when any prior stage is False
+- `test_gate_requires_candidate_exe` — gate fails when exe is missing
+
+**TestNativeTestsNotRunWhenHarnessMissing** (1 test):
+- `test_marks_not_run` — mocked harness resolution returns None
+
+All 13 tests pass. Tests are hermetic: no Pi toolchain, LLVM, or compiled
+binary required.
+
+---
+
+## 11 Metrics Summary (Known-Good Candidate, Full Pipeline)
+
+```
+lli tests:
+  tests_total:        10
+  tests_passed:       10
+  tests_failed:        0
+  ret_mismatches:      0
+  output_mismatches:   0
+  timeouts:            0
+  crashes:             0
+
+native tests:
+  native_tests_total:        10
+  native_tests_passed:       10
+  native_tests_failed:        0
+  native_ret_mismatches:      0
+  native_output_mismatches:   0
+  native_timeouts:            0
+  native_crashes:             0
+```
+
+### 11.1 Artifact IDs (deterministic)
 
 ```
 candidate_id: de499765dfe2e94002b34a27d113273ffe5c4345c6463f665f87cc5b2fb610b6
@@ -562,7 +786,7 @@ between each.
 
 ---
 
-## 11 Stub Candidate Baseline
+## 12 Stub Candidate Baseline
 
 The minimal stub (`ret i64 0`) was re-run after the authority revision to
 confirm baseline gate behavior:
@@ -594,9 +818,9 @@ run_id:       a3e8ff76d6f6e055b3ef1e26dcb39dac8b73360a071e6df2b6eebdda80ee46f7
 
 ---
 
-## 12 Verification Fixtures and Evidence
+## 13 Verification Fixtures and Evidence
 
-### 12.1 Directory Layout
+### 13.1 Directory Layout
 
 ```
 irx/experiment1/verification/
@@ -604,55 +828,70 @@ irx/experiment1/verification/
   candidates/
     sum_u32_le_known_good.ll                 Minimal stub for pipeline wiring checks
   evidence/
-    STEP_F_EVIDENCE.md                       Reproduction commands and PASS conditions
+    STEP_F_EVIDENCE.md                       Reproduction commands and PASS conditions (with Step H addendum)
     step_f_check.sh                          Automated A-F check script
+    step_h_check.sh                          Automated A-H check script (full pipeline)
   step_f/                                    (untracked, from development)
     sum_u32_le_good.ll                       Known-good implementation (10/10 pass)
-    run_step_f_check.sh                      Earlier verification script
-    README.md                                Step F fixture documentation
+
+irx/experiment1/harness/native/
+    native_runner.c                          Native ELF loader harness source
+    native_runner                            Compiled harness binary (built by runner)
 ```
 
-### 12.2 Committed Fixtures
+### 13.2 Committed Fixtures
 
 | File | Purpose |
 |------|---------|
 | `verification/README.md` | Central index: what the fixtures are, how to run, expected outcomes |
 | `verification/candidates/sum_u32_le_known_good.ll` | Stub candidate for pipeline wiring checks (fails lli_tests as expected) |
-| `verification/evidence/STEP_F_EVIDENCE.md` | Step F reproduction commands, PASS conditions, expected deterministic IDs |
-| `verification/evidence/step_f_check.sh` | Automated script: cleans runs, runs pipeline, prints summary |
+| `verification/evidence/STEP_F_EVIDENCE.md` | Step F/H reproduction commands, PASS conditions, expected deterministic IDs |
+| `verification/evidence/step_f_check.sh` | Automated script: cleans runs, runs pipeline (A-F), prints summary |
+| `verification/evidence/step_h_check.sh` | Automated script: cleans runs, runs full pipeline (A-H), prints summary with native test comparison |
 
-### 12.3 Running the Evidence Check
+### 13.3 Running the Evidence Check
+
+Step F check (partial pipeline):
 
 ```bash
 bash irx/experiment1/verification/evidence/step_f_check.sh
 ```
 
-Expected output includes:
+Step H check (full pipeline):
+
+```bash
+bash irx/experiment1/verification/evidence/step_h_check.sh
+```
+
+Expected output for Step H check includes:
 
 - `py_compile: OK`
-- Tool env lines for llvm-as, opt, lli, llc, clang
-- All stages precheck through clang_link: `ok=True`
-- `tests: 10/10 passed, 0 failed`
+- Tool env lines for llvm-as, opt, lli, llc, clang, native_harness
+- All 7 stages: `ok=True`
+- `lli tests: 10/10 passed, 0 failed`
+- `native tests: 10/10 passed, 0 failed`
 - `candidate.o: EXISTS (1008 bytes)`
 - `candidate.exe: EXISTS (2304 bytes)`
+- `lli/native match: ALL 10 tests agree`
 
 ---
 
-## 13 Tool Environment Lines (stderr)
+## 14 Tool Environment Lines (stderr)
 
-All five tool stages log their deterministic environment on stderr:
+All tool stages log their deterministic environment on stderr:
 
 ```
-[llvm-as] LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
-[opt]     LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
-[lli]     harness=irx/experiment1/harness/lli_abi_runner.py
-[llc]     LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
-[clang]   LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[llvm-as]        LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[opt]            LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[lli]            harness=irx/experiment1/harness/lli_abi_runner.py
+[llc]            LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[clang]          LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[native_harness] build=cached (or build=compiled), selftest=PASS
 ```
 
 ---
 
-## 14 Commit History
+## 15 Commit History
 
 | Hash | Message |
 |------|---------|
@@ -663,20 +902,23 @@ All five tool stages log their deterministic environment on stderr:
 | `1153420` | exp1: add verification fixture directory and run instructions |
 | `f0a6261` | exp1: add Step F evidence bundle and check script |
 | `89e6f50` | docs: rewrite pi_report with Step F evidence and full verification history |
+| `b0d8cd9` | exp1: implement Step G clang_link and rewrite pi_report |
 
 ---
 
-## 15 Properties Verified
+## 16 Properties Verified
 
 1. **Determinism**: The subprocess environment is derived entirely from frozen
    artifacts. No host environment variables are consulted. Repeated runs with
    the same candidate produce identical `candidate_id`, `run_id`, and
-   (timestamp-masked) JSON output, including all per-test results.
+   (timestamp-masked) JSON output, including all per-test results for both
+   lli and native tests.
 
-2. **Isolation**: The subprocess environment contains exactly four variables
+2. **Isolation**: LLVM tool subprocesses contain exactly four variables
    (`LC_ALL=C`, `LANG=C`, `TZ=UTC`, `LD_LIBRARY_PATH=/usr/lib/llvm-19/lib`).
-   No user environment leaks through. The clang_link stage uses `-fuse-ld=lld`
-   to avoid requiring `PATH`.
+   The native harness subprocess contains three (`LC_ALL=C`, `LANG=C`,
+   `TZ=UTC`). No user environment leaks through. The clang_link stage uses
+   `-fuse-ld=lld` to avoid requiring `PATH`.
 
 3. **Resource Limits**: `RLIMIT_RSS` is applied at 64 MiB to bound physical
    memory consumption. `RLIMIT_AS` is not applied, allowing the 123 MB
@@ -685,32 +927,40 @@ All five tool stages log their deterministic environment on stderr:
 
 4. **Schema Compliance**: All emitted JSON artifacts validate against the
    frozen result schema. The `runs` array contains exactly 7 stage records.
-   The optional `test_results` array, when present, contains per-test records
-   with all 11 required fields.
+   The optional `test_results` array contains per-test lli records. The
+   optional `native_test_results` array contains per-test native records.
+   All per-test records have all 11 required fields.
 
 5. **Gate Ordering**: Each stage runs only when its preconditions are met.
    Failure at any stage propagates NOT_RUN to all downstream stages.
-   clang_link is correctly blocked until llc_compile passes (which requires
-   lli_tests pass). This was confirmed with the stub (0/10 -> llc NOT_RUN ->
-   clang NOT_RUN) and the known-good candidate (10/10 -> llc PASS -> clang PASS).
+   native_tests is correctly blocked until clang_link passes (which requires
+   llc_compile, which requires lli_tests, etc.). This was confirmed with the
+   stub (0/10 → all downstream NOT_RUN) and the known-good candidate (10/10
+   → all stages PASS).
 
-6. **Artifact Integrity**: `candidate.bc` is produced after llvm_as_parse and
-   is non-empty. `candidate.o` is produced after llc_compile and is non-empty.
-   `candidate.exe` is produced after clang_link and is non-empty. All reside
-   at deterministic paths under `work/`.
+6. **Artifact Integrity**: Each stage produces its expected output:
+   `candidate.bc` (llvm_as), `candidate.o` (llc), `candidate.exe` (clang).
+   All reside at deterministic paths under `work/` and are verified non-empty
+   before downstream stages proceed.
 
-7. **End-to-End**: A correct candidate traverses all implemented stages
-   (precheck through clang_link) and produces a native aarch64 ELF executable.
-   The pipeline is ready for native_tests (Step H) to be wired.
+7. **End-to-End**: A correct candidate traverses all seven stages (precheck
+   through native_tests) and produces bitwise-identical results between
+   interpretation and native execution. The pipeline is complete.
 
 8. **Authority Revision Integrity**: The t08 vector correction changed exactly
    one field in one file. No other vectors, indices, or behavioral semantics
-   were altered. The correction was verified by achieving 10/10 pass with a
-   candidate whose arithmetic is independently verifiable.
+   were altered.
 
 9. **Linker Determinism**: The clang_link stage uses the colocated LLD linker
    via `-fuse-ld=lld`, producing the same static ELF output regardless of
    which system linkers are installed or what `PATH` is configured on the host.
+   The native harness build also uses `-fuse-ld=lld` for the same reason.
+
+10. **Interpreter-Native Equivalence**: All 10 test vectors produce identical
+    return values and output hex between `lli` (LLVM interpreter) and the
+    native harness (direct function call into loaded ELF). This validates that
+    the LLVM compilation pipeline (llvm-as → opt → llc → clang/lld) preserves
+    the candidate's semantics for the tested input domain.
 
 ---
 
@@ -782,7 +1032,38 @@ Why each flag is necessary:
   shared library dependencies, this is unnecessary and adds a non-deterministic
   element.
 
-## Appendix E — Reproduction Commands
+## Appendix E — Native Harness Architecture
+
+```
+native_runner <candidate.exe> <in_hex> <out_cap> f
+  |
+  +-- open(candidate.exe)
+  +-- mmap(PROT_READ) for header parsing
+  +-- validate: ELF64, LE, aarch64, no relocations
+  +-- compute PT_LOAD extent [vmin, vmax)
+  +-- mmap(MAP_ANONYMOUS) reserve region
+  +-- memcpy segments from file into region
+  +-- __builtin___clear_cache (aarch64 icache coherence)
+  +-- mprotect per-segment (RWX from p_flags)
+  +-- lookup symbol "f" in .symtab
+  +-- cast to candidate_fn (int64_t (*)(uint8_t*, int32_t, uint8_t*, int32_t))
+  +-- call fn(in_buf, in_len, out_buf, out_cap)
+  +-- printf("RET=%ld\n", ret)
+  +-- printf("OUT=%s\n", hex_encode(out_buf, ret))
+```
+
+Why not dlopen/dlsym:
+- The `f` symbol is in `.symtab` only, not `.dynsym`
+- `.dynsym` contains only the null entry
+- `dlsym` searches `.dynsym`, so it would return NULL
+
+Why `__builtin___clear_cache`:
+- aarch64 has separate data and instruction caches
+- Newly mapped code is visible in the data cache but not the instruction cache
+- Without the cache flush, the CPU may execute stale/zero bytes from icache
+- This is an aarch64-specific requirement (x86 has coherent I/D caches)
+
+## Appendix F — Reproduction Commands
 
 ```bash
 # Syntax check
@@ -793,7 +1074,7 @@ python3 runner/phase2/phase2_runner.py \
   --candidate irx/experiment1/verification/candidates/sum_u32_le_known_good.ll \
   --task sum_u32_le
 
-# Full A-G check (known-good candidate, expects all PASS through clang_link)
+# Full A-H check (known-good candidate, expects all PASS)
 python3 runner/phase2/phase2_runner.py \
   --candidate irx/experiment1/verification/step_f/sum_u32_le_good.ll \
   --task sum_u32_le
@@ -801,11 +1082,17 @@ python3 runner/phase2/phase2_runner.py \
 # Automated evidence check (Steps A-F)
 bash irx/experiment1/verification/evidence/step_f_check.sh
 
+# Automated evidence check (Steps A-H, full pipeline)
+bash irx/experiment1/verification/evidence/step_h_check.sh
+
+# Unit tests (hermetic, no LLVM required)
+python3 -m unittest runner/phase2/tests/test_native_tests.py
+
 # Inspect newest artifact
 ls -lt irx/experiment1/runs/*/*.json | head -n 1
 ```
 
-## Appendix F — Test Vector Summary (sum_u32_le)
+## Appendix G — Test Vector Summary (sum_u32_le)
 
 ```
 t01: in=""                                 ret=4   out="00000000"  (0 values, sum=0)
@@ -823,4 +1110,5 @@ t10: in="01000000020000000300000004000000" ret=4   out="0a000000"  (4 values: 1+
 ---
 
 *Verified on Raspberry Pi 5 — Raspberry Pi OS 64-bit — LLVM 19.1.7*
-*Phase 2 end-to-end through Step G: PASS*
+*Phase 2 end-to-end through Step H: PASS*
+*lli/native agreement: ALL 10 vectors match*

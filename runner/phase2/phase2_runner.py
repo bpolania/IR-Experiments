@@ -1122,6 +1122,238 @@ def _run_clang_link(
     return False, "CLANG_LINK_FAIL:policy_violation"
 
 
+def _resolve_native_harness_source(repo_root: Path) -> tuple[Path | None, str]:
+    src = repo_root / "irx" / "experiment1" / "harness" / "native" / "native_runner.c"
+    if not src.is_file():
+        return None, f"native_harness_source_not_found path={src.relative_to(repo_root)}"
+    return src, f"native_harness_source={src.relative_to(repo_root)}"
+
+
+def _ensure_native_harness_built(
+    *,
+    clang_path: str,
+    repo_root: Path,
+    timeout_stage_ms: int,
+    max_rss_mib: int,
+) -> tuple[bool, Path | None, str]:
+    src = repo_root / "irx" / "experiment1" / "harness" / "native" / "native_runner.c"
+    out = repo_root / "irx" / "experiment1" / "harness" / "native" / "native_runner"
+
+    # Cache: skip rebuild if binary is newer than source.
+    if out.is_file() and out.stat().st_mtime >= src.stat().st_mtime:
+        build_action = "CACHED"
+    else:
+        env, preexec_fn, _ = _prepare_clang_runtime(clang_path, max_rss_mib)
+        cmd = [
+            clang_path,
+            "-O2", "-Wall", "-Wextra", "-Werror", "-std=c11",
+            "-fno-omit-frame-pointer", "-fuse-ld=lld",
+            "-o", str(out), str(src),
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=timeout_stage_ms / 1000.0,
+                preexec_fn=preexec_fn,
+            )
+        except subprocess.TimeoutExpired:
+            return False, None, "NATIVE_HARNESS_BUILD_FAIL:timeout"
+        if proc.returncode != 0:
+            stderr_compact = " ".join((proc.stderr or "").split())[:240]
+            return False, None, f"NATIVE_HARNESS_BUILD_FAIL:rc={proc.returncode};stderr={stderr_compact}"
+        if not out.is_file():
+            return False, None, "NATIVE_HARNESS_BUILD_FAIL:output_missing"
+        build_action = "BUILT"
+
+    # Selftest.
+    selftest_env = {"LC_ALL": "C", "LANG": "C", "TZ": "UTC"}
+    try:
+        st = subprocess.run(
+            [str(out), "--selftest"],
+            env=selftest_env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout_stage_ms / 1000.0,
+        )
+    except subprocess.TimeoutExpired:
+        return False, None, f"NATIVE_HARNESS_SELFTEST_FAIL:timeout;build={build_action}"
+    if st.returncode != 0:
+        return False, None, f"NATIVE_HARNESS_SELFTEST_FAIL:rc={st.returncode};build={build_action}"
+
+    print(f"[native_harness] {build_action} selftest=PASS path={out.relative_to(repo_root)}", file=sys.stderr)
+    return True, out, f"NATIVE_HARNESS_{build_action}_SELFTEST_PASS"
+
+
+def _parse_native_runner_output(stdout_text: str) -> dict[str, Any]:
+    ret_val: int | None = None
+    out_hex: str | None = None
+    for line in stdout_text.splitlines():
+        if line.startswith("RET="):
+            try:
+                ret_val = int(line[4:].strip(), 10)
+            except ValueError:
+                return {"ok": False, "ret_i64": None, "out_hex": None, "detail": "invalid_ret_format"}
+        elif line.startswith("OUT="):
+            out_hex = line[4:].strip().lower()
+    if ret_val is None:
+        return {"ok": False, "ret_i64": None, "out_hex": None, "detail": "missing_ret"}
+    if out_hex is None:
+        out_hex = ""
+    return {"ok": True, "ret_i64": ret_val, "out_hex": out_hex, "detail": None}
+
+
+def _run_single_native_test(
+    *,
+    harness_path: Path,
+    candidate_exe_path: Path,
+    in_hex: str,
+    out_cap: int,
+    symbol: str,
+    timeout_ms: int,
+) -> dict[str, Any]:
+    cmd = [
+        str(harness_path),
+        str(candidate_exe_path),
+        in_hex if in_hex else "",
+        str(out_cap),
+        symbol,
+    ]
+    env = {"LC_ALL": "C", "LANG": "C", "TZ": "UTC"}
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=(timeout_ms / 1000.0) + 5.0,
+            env=env,
+        )
+        if proc.returncode != 0:
+            sig_name = None
+            if proc.returncode < 0:
+                sig_num = -proc.returncode
+                mapping = {
+                    signal.SIGSEGV: "SIGSEGV",
+                    signal.SIGILL: "SIGILL",
+                    signal.SIGABRT: "SIGABRT",
+                    signal.SIGFPE: "SIGFPE",
+                }
+                sig_name = mapping.get(sig_num)
+            return {
+                "ok": False,
+                "exit_code": proc.returncode if proc.returncode >= 0 else None,
+                "signal": sig_name,
+                "ret_i64": None,
+                "out_hex": None,
+                "detail": f"harness_nonzero_exit rc={proc.returncode}",
+            }
+        stdout = (proc.stdout or "").strip()
+        if not stdout:
+            return {"ok": False, "exit_code": 0, "signal": None, "ret_i64": None, "out_hex": None, "detail": "empty_harness_stdout"}
+        parsed = _parse_native_runner_output(stdout)
+        return {
+            "ok": parsed["ok"],
+            "exit_code": 0,
+            "signal": None,
+            "ret_i64": parsed["ret_i64"],
+            "out_hex": parsed["out_hex"],
+            "detail": parsed["detail"],
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "exit_code": None, "signal": None, "ret_i64": None, "out_hex": None, "detail": f"native_test_timeout ms={timeout_ms}"}
+    except Exception as exc:
+        return {"ok": False, "exit_code": None, "signal": None, "ret_i64": None, "out_hex": None, "detail": f"native_test_error {type(exc).__name__}"}
+
+
+def _run_native_tests(
+    *,
+    harness_path: Path,
+    candidate_exe_path: Path,
+    task_vectors: list[dict[str, Any]],
+    timeout_per_test_ms: int,
+    stage_record: dict[str, Any],
+) -> tuple[bool, str, list[dict[str, Any]], dict[str, int]]:
+    test_results: list[dict[str, Any]] = []
+    counts = {"passed": 0, "failed": 0, "ret_mismatches": 0, "output_mismatches": 0, "timeouts": 0, "crashes": 0}
+
+    for idx, vec in enumerate(task_vectors):
+        in_hex = vec.get("in_hex", "")
+        out_cap = vec.get("out_cap", 0)
+        expected_ret = vec.get("expected_ret", 0)
+        expected_out_hex = vec.get("expected_out_hex", "")
+
+        result = _run_single_native_test(
+            harness_path=harness_path,
+            candidate_exe_path=candidate_exe_path,
+            in_hex=in_hex,
+            out_cap=out_cap,
+            symbol="f",
+            timeout_ms=timeout_per_test_ms,
+        )
+
+        actual_ret = result.get("ret_i64")
+        actual_out_hex = result.get("out_hex")
+        sig_name = result.get("signal")
+        exit_code = result.get("exit_code")
+        detail = result.get("detail")
+
+        if not result.get("ok"):
+            if detail and "timeout" in detail.lower():
+                outcome = "TIMEOUT"
+                counts["timeouts"] += 1
+            elif sig_name:
+                outcome = "UNEXPECTED_CRASH"
+                counts["crashes"] += 1
+            else:
+                outcome = "UNEXPECTED_CRASH"
+                counts["crashes"] += 1
+            counts["failed"] += 1
+        else:
+            if actual_ret != expected_ret:
+                outcome = "RETURN_MISMATCH"
+                counts["ret_mismatches"] += 1
+                counts["failed"] += 1
+            elif (actual_out_hex or "") != (expected_out_hex or ""):
+                outcome = "OUTPUT_MISMATCH"
+                counts["output_mismatches"] += 1
+                counts["failed"] += 1
+            else:
+                outcome = "PASS"
+                counts["passed"] += 1
+
+        test_results.append({
+            "index": idx,
+            "in_hex": in_hex,
+            "out_cap": out_cap,
+            "expected_ret": expected_ret,
+            "expected_out_hex": expected_out_hex,
+            "actual_ret": actual_ret,
+            "actual_out_hex": actual_out_hex,
+            "outcome": outcome,
+            "exit_code": exit_code,
+            "signal": sig_name,
+            "detail": (detail or "")[:200] if detail else None,
+        })
+
+    all_pass = counts["failed"] == 0 and len(task_vectors) > 0
+    stage_record["ok"] = all_pass
+    stage_record["exit_code"] = 0 if all_pass else 1
+    stage_record["duration_ms"] = 0
+    stage_record["rss_mib"] = None
+    stage_record["crash"] = None if all_pass else {
+        "type": "POLICY_VIOLATION",
+        "signal": None,
+        "detail": f"native_tests_failed passed={counts['passed']} failed={counts['failed']} total={len(task_vectors)}",
+    }
+
+    detail_str = f"passed={counts['passed']};failed={counts['failed']};total={len(task_vectors)}"
+    return all_pass, f"NATIVE_TESTS_{'PASS' if all_pass else 'FAIL'}:{detail_str}", test_results, counts
+
+
 def run_step_a(
     repo_root: Path,
     task: str,
@@ -1461,6 +1693,107 @@ def run_step_a(
                     stage_record=runs_skeleton[5],
                 )
 
+    native_ok = False
+    native_test_results_list: list[dict[str, Any]] = []
+    native_tests_total = 0
+    native_tests_passed = 0
+    native_tests_failed = 0
+    native_ret_mismatches = 0
+    native_output_mismatches = 0
+    native_timeouts = 0
+    native_crashes = 0
+    candidate_exe_path = work_dir / "candidate.exe"
+    stage7_can_run = (
+        precheck_ok
+        and llvm_as_ok
+        and opt_ok
+        and lli_ok
+        and llc_ok
+        and clang_ok
+        and candidate_exe_path.is_file()
+        and candidate_exe_path.stat().st_size > 0
+    )
+    if not stage7_can_run:
+        native_detail = "NATIVE_TESTS_NOT_RUN:preconditions_failed"
+    else:
+        harness_src, harness_src_detail = _resolve_native_harness_source(repo_root)
+        if harness_src is None:
+            runs_skeleton[6]["ok"] = False
+            runs_skeleton[6]["exit_code"] = None
+            runs_skeleton[6]["duration_ms"] = 0
+            runs_skeleton[6]["rss_mib"] = None
+            runs_skeleton[6]["crash"] = {
+                "type": "POLICY_VIOLATION",
+                "signal": None,
+                "detail": harness_src_detail,
+            }
+            native_ok = False
+            native_detail = f"NATIVE_TESTS_FAIL:{harness_src_detail}"
+        else:
+            # Resolve clang path for building the harness.
+            clang_for_harness, _ = _resolve_clang_path(artifacts, repo_root)
+            if clang_for_harness is None:
+                runs_skeleton[6]["ok"] = False
+                runs_skeleton[6]["exit_code"] = None
+                runs_skeleton[6]["duration_ms"] = 0
+                runs_skeleton[6]["rss_mib"] = None
+                runs_skeleton[6]["crash"] = {
+                    "type": "POLICY_VIOLATION",
+                    "signal": None,
+                    "detail": "native_harness_build_no_clang",
+                }
+                native_ok = False
+                native_detail = "NATIVE_TESTS_FAIL:no_clang_for_harness_build"
+            else:
+                harness_built, harness_bin, harness_build_detail = _ensure_native_harness_built(
+                    clang_path=clang_for_harness,
+                    repo_root=repo_root,
+                    timeout_stage_ms=timeout_stage_ms,
+                    max_rss_mib=max_rss_mib,
+                )
+                if not harness_built:
+                    runs_skeleton[6]["ok"] = False
+                    runs_skeleton[6]["exit_code"] = None
+                    runs_skeleton[6]["duration_ms"] = 0
+                    runs_skeleton[6]["rss_mib"] = None
+                    runs_skeleton[6]["crash"] = {
+                        "type": "POLICY_VIOLATION",
+                        "signal": None,
+                        "detail": harness_build_detail,
+                    }
+                    native_ok = False
+                    native_detail = f"NATIVE_TESTS_FAIL:{harness_build_detail}"
+                else:
+                    # Re-resolve task vectors for native tests (same as lli_tests).
+                    _, native_task_vectors = _resolve_task_tests(artifacts, task)
+                    native_tests_total = len(native_task_vectors)
+                    if native_tests_total == 0:
+                        runs_skeleton[6]["ok"] = False
+                        runs_skeleton[6]["exit_code"] = None
+                        runs_skeleton[6]["duration_ms"] = 0
+                        runs_skeleton[6]["rss_mib"] = None
+                        runs_skeleton[6]["crash"] = {
+                            "type": "POLICY_VIOLATION",
+                            "signal": None,
+                            "detail": f"native_tests_no_vectors task={task}",
+                        }
+                        native_ok = False
+                        native_detail = f"NATIVE_TESTS_FAIL:no_vectors task={task}"
+                    else:
+                        native_ok, native_detail, native_test_results_list, native_counts = _run_native_tests(
+                            harness_path=harness_bin,
+                            candidate_exe_path=candidate_exe_path,
+                            task_vectors=native_task_vectors,
+                            timeout_per_test_ms=timeout_per_test_ms,
+                            stage_record=runs_skeleton[6],
+                        )
+                        native_tests_passed = native_counts["passed"]
+                        native_tests_failed = native_counts["failed"]
+                        native_ret_mismatches = native_counts["ret_mismatches"]
+                        native_output_mismatches = native_counts["output_mismatches"]
+                        native_timeouts = native_counts["timeouts"]
+                        native_crashes = native_counts["crashes"]
+
     result_obj: dict[str, Any] = {
         "experiment": str(artifacts["constants"].get("experiment", "1")),
         "task": task,
@@ -1481,7 +1814,7 @@ def run_step_a(
             },
             "policy": {
                 "ok": False,
-                "detail": loaded_artifacts_detail + ";" + llc_detail + ";" + clang_detail,
+                "detail": loaded_artifacts_detail + ";" + llc_detail + ";" + clang_detail + ";" + native_detail,
             },
             "tests": {
                 "ok": lli_ok,
@@ -1497,8 +1830,16 @@ def run_step_a(
             "output_mismatches": output_mismatches,
             "timeouts": timeouts,
             "crashes": crashes,
+            "native_tests_total": native_tests_total,
+            "native_tests_passed": native_tests_passed,
+            "native_tests_failed": native_tests_failed,
+            "native_ret_mismatches": native_ret_mismatches,
+            "native_output_mismatches": native_output_mismatches,
+            "native_timeouts": native_timeouts,
+            "native_crashes": native_crashes,
         },
         "test_results": test_results_list,
+        "native_test_results": native_test_results_list,
         "verdict": "ERROR",
     }
 
