@@ -1,0 +1,96 @@
+=== Phase 2 Regression Sweep ===
+date: 2026-02-16T08:34:39Z
+HEAD: 8563fd275f8e73d58ad2ced6b507e1cc4b155da9
+
+--- Task 1: sum_u32_le (known-good candidate, expect PASS) ---
+[llvm-as] LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[opt] LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[lli] harness=irx/experiment1/harness/lli_abi_runner.py
+[llc] LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[clang] LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[native_harness] CACHED selftest=PASS path=irx/experiment1/harness/native/native_runner
+Authority probe summary:
+  total_runs_scanned: 0
+  usable_runs_with_candidate_bytes: 0
+  runs_skipped_missing_candidate_bytes: 0
+  inference_status: SKIPPED_FROZEN_ID_RULES
+{
+  "candidate_id": "de499765dfe2e94002b34a27d113273ffe5c4345c6463f665f87cc5b2fb610b6",
+  "run_id": "4254c62717bfc6fbabf0ca1cf107b9519e030649890ea8b3d8acf9c9367f5d60",
+  "result_json": "/home/bpolania/documents/github/IR-Experiments/irx/experiment1/runs/de499765dfe2e94002b34a27d113273ffe5c4345c6463f665f87cc5b2fb610b6/4254c62717bfc6fbabf0ca1cf107b9519e030649890ea8b3d8acf9c9367f5d60.json",
+  "work_candidate": "/home/bpolania/documents/github/IR-Experiments/irx/experiment1/runs/de499765dfe2e94002b34a27d113273ffe5c4345c6463f665f87cc5b2fb610b6/4254c62717bfc6fbabf0ca1cf107b9519e030649890ea8b3d8acf9c9367f5d60/work/candidate.ll"
+}
+schema: OK
+verdict: PASS
+lli: 10 / 10
+native: 10 / 10
+candidate_id: de499765dfe2e94002b34a27d113273ffe5c4345c6463f665f87cc5b2fb610b6
+run_id: 4254c62717bfc6fbabf0ca1cf107b9519e030649890ea8b3d8acf9c9367f5d60
+  precheck             ok=True
+  llvm_as_parse        ok=True
+  opt_verify           ok=True
+  lli_tests            ok=True
+  llc_compile          ok=True
+  clang_link           ok=True
+  native_tests         ok=True
+
+--- Task 2: hex_encode (wrong candidate, expect FAIL) ---
+[llvm-as] LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[opt] LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[lli] harness=irx/experiment1/harness/lli_abi_runner.py
+Authority probe summary:
+  total_runs_scanned: 0
+  usable_runs_with_candidate_bytes: 0
+  runs_skipped_missing_candidate_bytes: 0
+  inference_status: SKIPPED_FROZEN_ID_RULES
+{
+  "candidate_id": "de499765dfe2e94002b34a27d113273ffe5c4345c6463f665f87cc5b2fb610b6",
+  "run_id": "4254c62717bfc6fbabf0ca1cf107b9519e030649890ea8b3d8acf9c9367f5d60",
+  "result_json": "/home/bpolania/documents/github/IR-Experiments/irx/experiment1/runs/de499765dfe2e94002b34a27d113273ffe5c4345c6463f665f87cc5b2fb610b6/4254c62717bfc6fbabf0ca1cf107b9519e030649890ea8b3d8acf9c9367f5d60.json",
+  "work_candidate": "/home/bpolania/documents/github/IR-Experiments/irx/experiment1/runs/de499765dfe2e94002b34a27d113273ffe5c4345c6463f665f87cc5b2fb610b6/4254c62717bfc6fbabf0ca1cf107b9519e030649890ea8b3d8acf9c9367f5d60/work/candidate.ll"
+}
+schema: OK
+verdict: FAIL
+lli: 0 / 10
+native: 0 / 0
+  precheck             ok=True
+  llvm_as_parse        ok=True
+  opt_verify           ok=True
+  lli_tests            ok=False
+  llc_compile          ok=False
+  clang_link           ok=False
+  native_tests         ok=False
+
+--- Task 3: parse_u32_decimal (wrong candidate, expect FAIL) ---
+[llvm-as] LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[opt] LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[lli] harness=irx/experiment1/harness/lli_abi_runner.py
+Authority probe summary:
+  total_runs_scanned: 0
+  usable_runs_with_candidate_bytes: 0
+  runs_skipped_missing_candidate_bytes: 0
+  inference_status: SKIPPED_FROZEN_ID_RULES
+{
+  "candidate_id": "de499765dfe2e94002b34a27d113273ffe5c4345c6463f665f87cc5b2fb610b6",
+  "run_id": "4254c62717bfc6fbabf0ca1cf107b9519e030649890ea8b3d8acf9c9367f5d60",
+  "result_json": "/home/bpolania/documents/github/IR-Experiments/irx/experiment1/runs/de499765dfe2e94002b34a27d113273ffe5c4345c6463f665f87cc5b2fb610b6/4254c62717bfc6fbabf0ca1cf107b9519e030649890ea8b3d8acf9c9367f5d60.json",
+  "work_candidate": "/home/bpolania/documents/github/IR-Experiments/irx/experiment1/runs/de499765dfe2e94002b34a27d113273ffe5c4345c6463f665f87cc5b2fb610b6/4254c62717bfc6fbabf0ca1cf107b9519e030649890ea8b3d8acf9c9367f5d60/work/candidate.ll"
+}
+schema: OK
+verdict: FAIL
+lli: 2 / 10
+native: 0 / 0
+  precheck             ok=True
+  llvm_as_parse        ok=True
+  opt_verify           ok=True
+  lli_tests            ok=False
+  llc_compile          ok=False
+  clang_link           ok=False
+  native_tests         ok=False
+
+=== Regression Sweep Summary ===
+sum_u32_le:        PASS (expected PASS)
+hex_encode:        FAIL (expected FAIL)
+parse_u32_decimal: FAIL (expected FAIL)
+all 3 schema validations: OK
+=== Done ===
