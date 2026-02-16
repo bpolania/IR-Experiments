@@ -15,6 +15,10 @@ from lib.paths import CandidateNotFoundError, discover_candidate_path, ensure_ru
 from lib.schema_validate import SchemaValidationError, validate_json_schema_instance
 
 
+class FrozenLimitsMissingError(RuntimeError):
+    pass
+
+
 def _iso_utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -42,6 +46,75 @@ def _build_runs_skeleton() -> list[dict[str, Any]]:
     ]
 
 
+def _load_precheck_limits(artifacts: dict[str, Any], repo_root: Path) -> tuple[int, int]:
+    constants_path = artifacts["constants_path"]
+    constants = artifacts["constants"]
+    limits = constants.get("limits")
+    if not isinstance(limits, dict):
+        raise FrozenLimitsMissingError(
+            "ERR_INTERNAL(-3): missing frozen limits object in "
+            f"{constants_path.relative_to(repo_root)}; required keys: max_ll_bytes, max_ll_lines"
+        )
+    if "max_ll_bytes" not in limits or "max_ll_lines" not in limits:
+        raise FrozenLimitsMissingError(
+            "ERR_INTERNAL(-3): missing frozen precheck limit key(s) in "
+            f"{constants_path.relative_to(repo_root)}; required keys: max_ll_bytes, max_ll_lines"
+        )
+    max_bytes = limits["max_ll_bytes"]
+    max_lines = limits["max_ll_lines"]
+    if not isinstance(max_bytes, int) or not isinstance(max_lines, int):
+        raise FrozenLimitsMissingError(
+            "ERR_INTERNAL(-3): invalid frozen precheck limit types in "
+            f"{constants_path.relative_to(repo_root)}; required integer keys: max_ll_bytes, max_ll_lines"
+        )
+    return max_bytes, max_lines
+
+
+def _count_lines(candidate_bytes: bytes) -> int:
+    if len(candidate_bytes) == 0:
+        return 0
+    return candidate_bytes.count(b"\n") + (0 if candidate_bytes.endswith(b"\n") else 1)
+
+
+def _apply_precheck(
+    runs: list[dict[str, Any]],
+    candidate_bytes: bytes,
+    max_bytes: int,
+    max_lines: int,
+) -> tuple[bool, str]:
+    precheck = runs[0]
+    byte_count = len(candidate_bytes)
+    line_count = _count_lines(candidate_bytes)
+
+    byte_fail = byte_count > max_bytes
+    line_fail = line_count > max_lines
+
+    if byte_fail or line_fail:
+        reasons: list[str] = []
+        if byte_fail:
+            reasons.append(f"bytes_exceeded actual={byte_count} limit={max_bytes}")
+        if line_fail:
+            reasons.append(f"lines_exceeded actual={line_count} limit={max_lines}")
+        reason = "; ".join(reasons)
+        precheck["ok"] = False
+        precheck["exit_code"] = None
+        precheck["duration_ms"] = 0
+        precheck["rss_mib"] = None
+        precheck["crash"] = {
+            "type": "POLICY_VIOLATION",
+            "signal": None,
+            "detail": f"precheck_failed:{reason}",
+        }
+        return False, f"PRECHECK_FAIL:{reason}"
+
+    precheck["ok"] = True
+    precheck["exit_code"] = None
+    precheck["duration_ms"] = 0
+    precheck["rss_mib"] = None
+    precheck["crash"] = None
+    return True, f"PRECHECK_PASS:bytes={byte_count}/{max_bytes};lines={line_count}/{max_lines}"
+
+
 def run_step_a(
     repo_root: Path,
     task: str,
@@ -54,6 +127,7 @@ def run_step_a(
 
     candidate_path = discover_candidate_path(exp_root=exp_root, explicit_candidate=candidate)
     candidate_bytes = candidate_path.read_bytes()
+    max_candidate_bytes, max_candidate_lines = _load_precheck_limits(artifacts, repo_root)
 
     authority = resolve_id_authority(artifacts=artifacts, repo_root=repo_root)
     print(format_probe_summary(authority["probe_summary"]))
@@ -85,6 +159,13 @@ def run_step_a(
         f"id_authority_run={authority.get('run_reason')};"
         f"id_notes={','.join(id_notes)}"
     )
+    runs_skeleton = _build_runs_skeleton()
+    precheck_ok, precheck_detail = _apply_precheck(
+        runs=runs_skeleton,
+        candidate_bytes=candidate_bytes,
+        max_bytes=max_candidate_bytes,
+        max_lines=max_candidate_lines,
+    )
 
     result_obj: dict[str, Any] = {
         "experiment": str(artifacts["constants"].get("experiment", "1")),
@@ -98,7 +179,7 @@ def run_step_a(
         "gates": {
             "parse": {
                 "ok": False,
-                "detail": loaded_artifacts_detail,
+                "detail": loaded_artifacts_detail + ";" + precheck_detail,
             },
             "verify": {
                 "ok": False,
@@ -113,7 +194,7 @@ def run_step_a(
                 "detail": loaded_artifacts_detail,
             },
         },
-        "runs": _build_runs_skeleton(),
+        "runs": runs_skeleton,
         "metrics": {
             "tests_total": 0,
             "tests_passed": 0,
@@ -121,7 +202,7 @@ def run_step_a(
             "ret_mismatches": 0,
             "output_mismatches": 0,
             "timeouts": 0,
-            "crashes": 0,
+            "crashes": 0 if precheck_ok else 1,
         },
         "verdict": "ERROR",
     }
@@ -167,6 +248,9 @@ def main() -> int:
     except AuthorityRecoveryError as exc:
         print(str(exc))
         return exc.code
+    except FrozenLimitsMissingError as exc:
+        print(str(exc))
+        return 3
     except SchemaValidationError as exc:
         print(f"ERR_INTERNAL(-3): schema validation failed: {exc}")
         return 3

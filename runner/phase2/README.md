@@ -1,8 +1,8 @@
-# Phase 2 Runner - Step A
+# Phase 2 Runner - Step A + Step B Precheck
 
 This module provides the Phase 2 Step A skeleton for Experiment 1.
 
-Step A behavior:
+Step A/Step B behavior:
 - Loads frozen artifacts (tool snapshot, limits, schema, and test vectors).
 - Discovers candidate `.ll` deterministically using explicit `--candidate`.
 - Recovers authoritative `candidate_id` / `run_id` rules using repo evidence precedence:
@@ -12,6 +12,12 @@ Step A behavior:
   - `--candidate-id` and/or `--run-id`
 - Emits seven Phase 2 run stages in NOT_RUN form when IDs are available:
   - `precheck`, `llvm_as_parse`, `opt_verify`, `lli_tests`, `llc_compile`, `clang_link`, `native_tests`
+- Enforces Step B precheck limits from frozen Phase 0 limits:
+  - `max_ll_bytes`
+  - `max_ll_lines`
+  using deterministic line counting:
+  - line_count = number of `\\n` bytes + 1 when non-empty and not newline-terminated
+  - line_count = 0 when empty
 - Copies the candidate byte-for-byte to `irx/experiment1/runs/<candidate_id>/<run_id>/work/candidate.ll`.
 - Emits a schema-validated result to `irx/experiment1/runs/<candidate_id>/<run_id>.json`.
 
@@ -35,3 +41,23 @@ python3 runner/phase2/phase2_runner.py --candidate /path/to/candidate.ll --candi
 
 Run Step A twice on the same candidate.
 - Outputs should match except `timestamps.started_at` and `timestamps.finished_at`.
+
+## Precheck Test Cases
+
+Run under-limit case:
+
+```bash
+python3 runner/phase2/phase2_runner.py --candidate /tmp/cand_under.ll
+```
+
+Run over-bytes case (> `max_ll_bytes`):
+
+```bash
+python3 runner/phase2/phase2_runner.py --candidate /tmp/cand_over_bytes.ll
+```
+
+Run over-lines case (> `max_ll_lines`):
+
+```bash
+python3 runner/phase2/phase2_runner.py --candidate /tmp/cand_over_lines.ll
+```
