@@ -12,7 +12,7 @@ native AArch64 execution, running on a Raspberry Pi 5.
 | Commit | Date (PST) | Milestone |
 |---|---|---|
 | `a5d84da` | 2026-02-15 23:32 | Implement Step H native_tests, extend result schema |
-| `5201dd2` | 2026-02-15 23:41 | Phase 2 closure record and Step H evidence log |
+| `5201dd2` | 2026-02-15 23:41 | Add `PHASE2_CLOSURE.md` and `step_h_check_20260215_234036.log` |
 | `8762240` | 2026-02-15 23:55 | Verdict computation fix |
 | `8563fd2` | 2026-02-16 00:30 | Update pi_report.md (regression sweep ran at this HEAD) |
 | `b104ff5` | 2026-02-16 00:48 | Documentation accuracy pass (stage lettering, native loader) |
@@ -246,10 +246,21 @@ Defines the experiment number, the shared ABI contract, error codes, resource
 limits, and the crash type taxonomy.
 
 The ABI contract specifies that every candidate exports a single function `f`
-with signature `i32 @f(i8* %in_ptr, i32 %in_len, i8* %out_ptr, i32 %out_cap)`.
+with signature `i64 @f(ptr %in_ptr, i32 %in_len, ptr %out_ptr, i32 %out_cap)`.
 The function reads from an input buffer, writes to an output buffer, and
 returns the number of bytes written on success or a negative error code on
-failure. The three defined error codes are:
+failure.
+
+**Note:** The `signature_ir` field inside `constants.json` and the three
+`tasks/*/spec.json` files still contains a stale `i32` return type
+(`"i32 @f(i8* ...)"`) from an earlier draft. The runner never reads this
+field — it is purely documentary. Every executable artifact in the repository
+uses `i64`: the lli shim (`shim.ll:366`), the lli harness
+(`lli_abi_runner.py:6`), the native harness typedef (`native_runner.c:32`),
+and the known-good candidate (`sum_u32_le_good.ll:4`). The authoritative
+return type is `i64`.
+
+The three defined error codes are:
 
 | Code | Name | Meaning |
 |---|---|---|
@@ -1011,7 +1022,35 @@ The `LOADED_STEP_A:` prefix claim was verified by grep against both the
 runner source (`runner/phase2/phase2_runner.py` line 1440) and the produced
 result JSON artifact, where it appears in all four `gates.parse.detail`,
 `gates.verify.detail`, `gates.tests.detail`, and `gates.policy.detail`
-strings.
+strings. Concrete example from `gates.parse.detail` in the result artifact
+at `runs/<candidate_id>/<run_id>.json` (truncated for readability):
+
+```json
+{
+  "gates": {
+    "parse": {
+      "ok": true,
+      "detail": "LOADED_STEP_A:tool_versions=irx/experiment1/env/tool_versions.json;result_schema=irx/experiment1/harness/result_schema.json;constants=irx/experiment1/harness/constants.json;target=irx/experiment1/env/target.json;test_vectors=...;PRECHECK_PASS:...;LLVM_AS_PARSE_PASS"
+    }
+  }
+}
+```
+
+The full detail string is a semicolon-delimited trace of every artifact loaded
+during Step A, followed by the stage-specific suffix. Run artifacts are not
+committed to git; reproduce via:
+
+```bash
+python3 runner/phase2/phase2_runner.py \
+  --candidate irx/experiment1/verification/step_f/sum_u32_le_good.ll \
+  --task sum_u32_le
+python3 -c "
+import json, os; from glob import glob
+p = sorted(glob('irx/experiment1/runs/*/*.json'), key=os.path.getmtime)[-1]
+d = json.load(open(p))
+print(d['gates']['parse']['detail'][:200])
+"
+```
 
 ---
 
