@@ -111,6 +111,12 @@
         }
       }
     },
+    "test_results": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/testResult"
+      }
+    },
     "verdict": {
       "type": "string",
       "enum": ["PASS", "FAIL", "ERROR"]
@@ -190,6 +196,70 @@
         },
         "crash": {
           "$ref": "#/$defs/crash"
+        }
+      }
+    },
+    "testResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "in_hex",
+        "out_cap",
+        "expected_ret",
+        "expected_out_hex",
+        "actual_ret",
+        "actual_out_hex",
+        "outcome",
+        "exit_code",
+        "signal",
+        "detail"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "in_hex": {
+          "type": "string"
+        },
+        "out_cap": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expected_ret": {
+          "type": "integer"
+        },
+        "expected_out_hex": {
+          "type": "string"
+        },
+        "actual_ret": {
+          "type": ["integer", "null"]
+        },
+        "actual_out_hex": {
+          "type": ["string", "null"]
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "PASS",
+            "RETURN_MISMATCH",
+            "OUTPUT_MISMATCH",
+            "UNEXPECTED_CRASH",
+            "TIMEOUT",
+            "OOM"
+          ]
+        },
+        "exit_code": {
+          "type": ["integer", "null"]
+        },
+        "signal": {
+          "type": ["string", "null"],
+          "enum": ["SIGSEGV", "SIGILL", "SIGABRT", "SIGFPE", null]
+        },
+        "detail": {
+          "type": ["string", "null"],
+          "maxLength": 200
         }
       }
     }

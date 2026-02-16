@@ -79,3 +79,106 @@ After the script runs, review:
 6) Do not proceed to Phase 2 until Phase 1 passes on the Pi
 
 Phase 2 depends on a valid ARM64/Linux LLVM toolchain and a captured tool snapshot.
+
+## ABI Harness Contract
+
+Authoritative `lli` harness entrypoint:
+- `irx/experiment1/harness/lli_abi_runner.py`
+
+Frozen candidate ABI:
+- `i64 @f(i8* %in_ptr, i32 %in_len, i8* %out_ptr, i32 %out_cap)`
+
+Frozen shim source and contract docs:
+- `irx/experiment1/harness/lli_shim/shim.c`
+- `irx/experiment1/harness/lli_shim/README.md`
+
+The harness executes `lli` with an absolute `--lli` path, links `candidate.bc` with the frozen shim, and prints exactly one JSON object to stdout.
+
+## Per-test Results Schema
+
+`harness/result_schema.json` includes an optional top-level field:
+- `test_results`: array of per-test records for `lli_tests`
+
+Each item records expected vs actual return/output plus deterministic outcome classification without changing existing required top-level fields.
+
+## Raspberry Pi (ARM64) runbook (Experiment 1)
+
+### 1) Toolchain snapshot (must match)
+
+This experiment uses frozen absolute tool paths from:
+
+- `env/tool_versions.json`
+
+The Phase 2 runner will not use PATH lookup. It will use the snapshot paths and will record `POLICY_VIOLATION` if a frozen tool path is missing/non-executable.
+
+Verify on Pi:
+
+```bash
+cat env/tool_versions.json | sed -n '1,200p'
+ls -l /usr/lib/llvm-19/bin/llvm-as /usr/lib/llvm-19/bin/opt /usr/lib/llvm-19/bin/lli || true
+```
+
+### 2) Frozen ABI for @f (authoritative)
+
+Candidate function signature (LLVM):
+- `i64 @f(i8* %in_ptr, i32 %in_len, i8* %out_ptr, i32 %out_cap)`
+
+C equivalent:
+- `int64_t f(uint8_t* in_ptr, int32_t in_len, uint8_t* out_ptr, int32_t out_cap);`
+
+Do not introduce wrappers or alternate signatures without an authority revision.
+
+### 3) Build the lli shim bitcode (required for Step E)
+
+The ABI harness uses a shim module compiled to bitcode:
+- `harness/lli_shim/shim.c -> harness/lli_shim/shim.bc`
+
+Build on Pi (use frozen LLVM tools):
+
+```bash
+cd irx/experiment1/harness/lli_shim
+/usr/lib/llvm-19/bin/clang -O0 -S -emit-llvm shim.c -o shim.ll
+/usr/lib/llvm-19/bin/llvm-as shim.ll -o shim.bc
+ls -l shim.bc
+```
+
+### 4) Harness contract (`harness/lli_abi_runner.py`)
+
+The harness is the authoritative way to run a single test case under lli without inventing ABI semantics.
+
+CLI:
+- `--lli <absolute_path>` (required)
+- `--bc <path/to/candidate.bc>` (required)
+- `--in_hex <hex>` (required)
+- `--out_cap <int>` (required)
+- `--timeout_ms <int>` (required)
+- `--entry <symbol>` (optional, default `f`)
+- `--workdir <dir>` (optional)
+
+Stdout: exactly one JSON line with fixed keys:
+- `ok`, `exit_code`, `signal`, `ret_i64`, `out_hex`, `detail`
+
+Preflight (no tool execution required):
+
+```bash
+python3 -m py_compile harness/lli_abi_runner.py
+python3 harness/lli_abi_runner.py --lli /does/not/matter --bc /tmp/missing.bc --in_hex 00 --out_cap 4 --timeout_ms 10
+```
+
+### 5) Phase 2 runner (current gates)
+
+Run:
+
+```bash
+python3 runner/phase2/phase2_runner.py --candidate /path/to/candidate.ll
+```
+
+Artifacts:
+- `runs/<candidate_id>/<run_id>.json`
+- `runs/<candidate_id>/<run_id>/work/`
+
+Notes:
+- Step B enforces `limits.max_ll_bytes` and `limits.max_ll_lines` from `harness/constants.json`.
+- Step C uses `llvm-as` to produce `work/candidate.bc`.
+- Step D runs `opt -verify -disable-output candidate.bc`.
+- Step E is unblocked by the `test_results` schema container and the `lli_abi_runner.py` harness + shim.

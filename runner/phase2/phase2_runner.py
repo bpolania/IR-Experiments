@@ -26,6 +26,22 @@ class FrozenToolPathMissingError(RuntimeError):
     pass
 
 
+HARNESS_SEARCH_PATTERNS = [
+    "lli",
+    "@f",
+    "candidate.bc",
+    "--entry-function",
+    "-entry-function",
+    "in_hex",
+    "out_cap",
+    "expected_out_hex",
+    "expected_ret",
+    "sum_u32_le",
+    "hex_encode",
+    "parse_u32_decimal",
+]
+
+
 def _iso_utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -101,6 +117,30 @@ def _load_stage_exec_limits(artifacts: dict[str, Any], repo_root: Path) -> tuple
     return timeout_stage_ms, max_rss_mib
 
 
+def _load_test_exec_limits(artifacts: dict[str, Any], repo_root: Path) -> tuple[int, int]:
+    constants_path = artifacts["constants_path"]
+    constants = artifacts["constants"]
+    limits = constants.get("limits")
+    if not isinstance(limits, dict):
+        raise FrozenLimitsMissingError(
+            "ERR_INTERNAL(-3): missing frozen limits object in "
+            f"{constants_path.relative_to(repo_root)}; required keys: timeout_per_test_ms, max_rss_mib"
+        )
+    if "timeout_per_test_ms" not in limits or "max_rss_mib" not in limits:
+        raise FrozenLimitsMissingError(
+            "ERR_INTERNAL(-3): missing frozen lli test limit key(s) in "
+            f"{constants_path.relative_to(repo_root)}; required keys: timeout_per_test_ms, max_rss_mib"
+        )
+    timeout_per_test_ms = limits["timeout_per_test_ms"]
+    max_rss_mib = limits["max_rss_mib"]
+    if not isinstance(timeout_per_test_ms, int) or not isinstance(max_rss_mib, int):
+        raise FrozenLimitsMissingError(
+            "ERR_INTERNAL(-3): invalid frozen lli test limit types in "
+            f"{constants_path.relative_to(repo_root)}; required integer keys: timeout_per_test_ms, max_rss_mib"
+        )
+    return timeout_per_test_ms, max_rss_mib
+
+
 def _resolve_llvm_as_path(artifacts: dict[str, Any], repo_root: Path) -> tuple[str | None, str]:
     tool_versions = artifacts["tool_versions"]
     tv_path = artifacts["tool_versions_path"]
@@ -147,6 +187,188 @@ def _resolve_opt_path(artifacts: dict[str, Any], repo_root: Path) -> tuple[str |
     if not p.is_file() or not os.access(str(p), os.X_OK):
         return None, f"opt_not_executable path={path} source={source}"
     return path, f"opt_executable path={path} source={source}"
+
+
+def _resolve_lli_path(artifacts: dict[str, Any], repo_root: Path) -> tuple[str | None, str]:
+    tool_versions = artifacts["tool_versions"]
+    tv_path = artifacts["tool_versions_path"]
+    source = str(tv_path.relative_to(repo_root))
+    detected = tool_versions.get("detected")
+    if not isinstance(detected, dict):
+        return None, f"lli_not_executable path=<missing> source={source}"
+
+    key_used = None
+    lli_entry = None
+    if isinstance(detected.get("lli"), dict):
+        key_used = "lli"
+        lli_entry = detected["lli"]
+    elif isinstance(detected.get("llvm-lli"), dict):
+        key_used = "llvm-lli"
+        lli_entry = detected["llvm-lli"]
+
+    if not isinstance(lli_entry, dict):
+        return None, f"lli_not_executable path=<missing> source={source}"
+
+    path = lli_entry.get("path")
+    if not isinstance(path, str) or len(path.strip()) == 0:
+        return None, f"lli_not_executable path=<missing> source={source};key=detected.{key_used}.path"
+    p = Path(path)
+    if not p.is_file() or not os.access(str(p), os.X_OK):
+        return None, f"lli_not_executable path={path} source={source}"
+    return path, f"lli_executable path={path} source={source}"
+
+
+def _resolve_task_tests(artifacts: dict[str, Any], task: str) -> tuple[str | None, list[dict[str, Any]]]:
+    if task in (None, "", "all_tasks"):
+        return None, []
+    relative = f"irx/experiment1/tasks/{task}/tests.json"
+    obj = artifacts["test_vectors"].get(relative)
+    if not isinstance(obj, dict):
+        return None, []
+    vectors = obj.get("vectors")
+    if not isinstance(vectors, list):
+        return None, []
+    typed: list[dict[str, Any]] = []
+    for item in vectors:
+        if isinstance(item, dict):
+            typed.append(item)
+    return relative, typed
+
+
+def _is_hidden_path(path: Path) -> bool:
+    return any(part.startswith(".") for part in path.parts)
+
+
+def _discover_lli_abi_mechanism(repo_root: Path) -> dict[str, Any]:
+    exp_root = repo_root / "irx" / "experiment1"
+    harness_root = exp_root / "harness"
+    search_roots = [harness_root, exp_root]
+
+    inspected_files: list[str] = []
+    candidate_mechanisms: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for p in sorted(root.rglob("*")):
+            if p in seen:
+                continue
+            seen.add(p)
+            if not p.is_file():
+                continue
+            rel = p.relative_to(repo_root)
+            if _is_hidden_path(rel):
+                continue
+            if "runs" in rel.parts:
+                continue
+            inspected_files.append(str(rel))
+            try:
+                text = p.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+            if len(text) == 0:
+                continue
+
+            lower = text.lower()
+            matched = [pat for pat in HARNESS_SEARCH_PATTERNS if pat.lower() in lower]
+            has_lli = "lli" in lower
+            has_candidate_bc = "candidate.bc" in lower
+            has_f_symbol = "@f" in text
+            has_io_contract = (
+                ("in_hex" in lower and "out_cap" in lower)
+                or ("in_ptr" in lower and "out_ptr" in lower)
+            )
+            has_expected_actual = (
+                "expected_ret" in lower
+                or "expected_out_hex" in lower
+                or "actual_ret" in lower
+                or "actual_out_hex" in lower
+            )
+            has_exec = (
+                "subprocess" in lower
+                or "popen(" in lower
+                or "os.system(" in lower
+                or " lli " in lower
+            )
+
+            if has_lli and has_candidate_bc and has_f_symbol and has_io_contract and has_expected_actual and has_exec:
+                candidate_mechanisms.append({
+                    "path": str(rel),
+                    "matched_patterns": matched,
+                })
+
+    candidate_mechanisms.sort(key=lambda x: x["path"])
+    inspected_files_sorted = sorted(inspected_files)
+    report: dict[str, Any] = {
+        "searched_dirs": [str(harness_root.relative_to(repo_root)), str(exp_root.relative_to(repo_root))],
+        "searched_patterns": HARNESS_SEARCH_PATTERNS,
+        "inspected_files_count": len(inspected_files_sorted),
+        "inspected_files_sample": inspected_files_sorted[:30],
+    }
+
+    if candidate_mechanisms:
+        chosen = candidate_mechanisms[0]
+        report["status"] = "found"
+        report["chosen_harness"] = chosen["path"]
+        report["chosen_harness_contract"] = "existing_repo_mechanism_detected_by_pattern_bundle"
+        report["chosen_harness_evidence_patterns"] = chosen["matched_patterns"]
+    else:
+        report["status"] = "not_found"
+        report["chosen_harness"] = None
+        report["chosen_harness_contract"] = None
+        report["chosen_harness_evidence_patterns"] = []
+
+    return report
+
+
+def _format_harness_not_found_detail(report: dict[str, Any]) -> str:
+    sample = report.get("inspected_files_sample", [])
+    listed = ",".join(sample) if isinstance(sample, list) else ""
+    omitted = max(int(report.get("inspected_files_count", 0)) - (len(sample) if isinstance(sample, list) else 0), 0)
+    if omitted > 0:
+        listed = f"{listed},... ({omitted} more omitted)" if listed else f"... ({omitted} more omitted)"
+    return (
+        "lli_abi_mechanism_not_found;"
+        f"searched_dirs={','.join(report.get('searched_dirs', []))};"
+        f"searched_patterns={','.join(report.get('searched_patterns', []))};"
+        f"inspected_files={listed}"
+    )
+
+
+def _schema_supports_per_test_results(schema: dict[str, Any]) -> tuple[bool, str]:
+    inspected_paths = [
+        "$.properties",
+        "$.properties.runs",
+        "$.properties.metrics",
+        "$.properties.gates",
+        "$.$defs",
+    ]
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return False, "ERR_INTERNAL(-3): schema missing $.properties"
+
+    for _, val in props.items():
+        if not isinstance(val, dict):
+            continue
+        if val.get("type") != "array":
+            continue
+        item = val.get("items")
+        if not isinstance(item, dict):
+            continue
+        if "$ref" in item and item.get("$ref") == "#/$defs/runRecord":
+            continue
+        item_props = item.get("properties")
+        if not isinstance(item_props, dict):
+            continue
+        required = {"test_id", "expected_ret", "expected_out_hex", "actual_ret", "actual_out_hex"}
+        if required.issubset(set(item_props.keys())):
+            return True, "schema has explicit per-test array"
+
+    return False, (
+        "ERR_INTERNAL(-3): schema has no explicit per-test result container; "
+        f"inspected={','.join(inspected_paths)}"
+    )
 
 
 def _count_lines(candidate_bytes: bytes) -> int:
@@ -444,6 +666,7 @@ def run_step_a(
     candidate_bytes = candidate_path.read_bytes()
     max_candidate_bytes, max_candidate_lines = _load_precheck_limits(artifacts, repo_root)
     timeout_stage_ms, max_rss_mib = _load_stage_exec_limits(artifacts, repo_root)
+    timeout_per_test_ms, max_rss_mib_tests = _load_test_exec_limits(artifacts, repo_root)
 
     authority = resolve_id_authority(artifacts=artifacts, repo_root=repo_root)
     print(format_probe_summary(authority["probe_summary"]))
@@ -540,6 +763,122 @@ def run_step_a(
                 stage_record=runs_skeleton[2],
             )
 
+    lli_ok = False
+    tests_total = 0
+    tests_passed = 0
+    tests_failed = 0
+    ret_mismatches = 0
+    output_mismatches = 0
+    timeouts = 0
+    crashes = 0 if (precheck_ok and llvm_as_ok and opt_ok) else 1
+
+    stage4_can_run = (
+        precheck_ok
+        and llvm_as_ok
+        and opt_ok
+        and candidate_bc_path.is_file()
+        and candidate_bc_path.stat().st_size > 0
+    )
+    harness_probe: dict[str, Any] | None = None
+    if not stage4_can_run:
+        lli_detail = "LLI_TESTS_NOT_RUN:preconditions_failed"
+    else:
+        lli_path, lli_path_detail = _resolve_lli_path(artifacts, repo_root)
+        if lli_path is None:
+            runs_skeleton[3]["ok"] = False
+            runs_skeleton[3]["exit_code"] = None
+            runs_skeleton[3]["duration_ms"] = 0
+            runs_skeleton[3]["rss_mib"] = None
+            runs_skeleton[3]["crash"] = {
+                "type": "POLICY_VIOLATION",
+                "signal": None,
+                "detail": lli_path_detail,
+            }
+            lli_ok = False
+            lli_detail = f"LLI_TESTS_FAIL:{lli_path_detail}"
+            crashes = 1
+        else:
+            harness_probe = _discover_lli_abi_mechanism(repo_root)
+            task_tests_path, task_vectors = _resolve_task_tests(artifacts, task)
+            tests_total = len(task_vectors)
+            if task_tests_path is None:
+                runs_skeleton[3]["ok"] = False
+                runs_skeleton[3]["exit_code"] = None
+                runs_skeleton[3]["duration_ms"] = 0
+                runs_skeleton[3]["rss_mib"] = None
+                runs_skeleton[3]["crash"] = {
+                    "type": "POLICY_VIOLATION",
+                    "signal": None,
+                    "detail": f"lli_tests_task_not_found task={task}",
+                }
+                lli_ok = False
+                lli_detail = f"LLI_TESTS_FAIL:task_not_found task={task}"
+                tests_failed = tests_total
+                crashes = 1
+            else:
+                if harness_probe.get("status") != "found":
+                    detail = _format_harness_not_found_detail(harness_probe)
+                    runs_skeleton[3]["ok"] = False
+                    runs_skeleton[3]["exit_code"] = None
+                    runs_skeleton[3]["duration_ms"] = 0
+                    runs_skeleton[3]["rss_mib"] = None
+                    runs_skeleton[3]["crash"] = {
+                        "type": "POLICY_VIOLATION",
+                        "signal": None,
+                        "detail": detail,
+                    }
+                    lli_ok = False
+                    lli_detail = f"LLI_TESTS_FAIL:{detail}"
+                    tests_failed = tests_total
+                    crashes = 1
+                else:
+                    schema_has_per_test, schema_detail = _schema_supports_per_test_results(artifacts["result_schema"])
+                    if not schema_has_per_test:
+                        runs_skeleton[3]["ok"] = False
+                        runs_skeleton[3]["exit_code"] = None
+                        runs_skeleton[3]["duration_ms"] = 0
+                        runs_skeleton[3]["rss_mib"] = None
+                        runs_skeleton[3]["crash"] = {
+                            "type": "POLICY_VIOLATION",
+                            "signal": None,
+                            "detail": schema_detail,
+                        }
+                        lli_ok = False
+                        lli_detail = f"LLI_TESTS_FAIL:{schema_detail}"
+                        tests_failed = tests_total
+                        crashes = 1
+                    else:
+                        mechanism = str(harness_probe.get("chosen_harness"))
+                        detail = (
+                            "ERR_INTERNAL(-3): frozen lli ABI invocation contract is not machine-readable; "
+                            f"chosen_harness={mechanism};required_contract=explicit_cli_or_io_spec"
+                        )
+                        runs_skeleton[3]["ok"] = False
+                        runs_skeleton[3]["exit_code"] = None
+                        runs_skeleton[3]["duration_ms"] = 0
+                        runs_skeleton[3]["rss_mib"] = None
+                        runs_skeleton[3]["crash"] = {
+                            "type": "POLICY_VIOLATION",
+                            "signal": None,
+                            "detail": detail,
+                        }
+                        lli_ok = False
+                        lli_detail = (
+                            f"LLI_TESTS_FAIL:{detail};timeout_per_test_ms={timeout_per_test_ms};"
+                            f"max_rss_mib={max_rss_mib_tests}"
+                        )
+                        tests_failed = tests_total
+                        crashes = 1
+
+    probe_detail = ""
+    if harness_probe is not None:
+        probe_detail = (
+            ";LLI_HARNESS_PROBE:"
+            f"status={harness_probe.get('status')};"
+            f"chosen={harness_probe.get('chosen_harness')};"
+            f"inspected_files_count={harness_probe.get('inspected_files_count')}"
+        )
+
     result_obj: dict[str, Any] = {
         "experiment": str(artifacts["constants"].get("experiment", "1")),
         "task": task,
@@ -563,19 +902,19 @@ def run_step_a(
                 "detail": loaded_artifacts_detail,
             },
             "tests": {
-                "ok": False,
-                "detail": loaded_artifacts_detail,
+                "ok": lli_ok,
+                "detail": loaded_artifacts_detail + ";" + lli_detail + probe_detail,
             },
         },
         "runs": runs_skeleton,
         "metrics": {
-            "tests_total": 0,
-            "tests_passed": 0,
-            "tests_failed": 0,
-            "ret_mismatches": 0,
-            "output_mismatches": 0,
-            "timeouts": 0,
-            "crashes": 0 if (precheck_ok and llvm_as_ok and opt_ok) else 1,
+            "tests_total": tests_total,
+            "tests_passed": tests_passed,
+            "tests_failed": tests_failed,
+            "ret_mismatches": ret_mismatches,
+            "output_mismatches": output_mismatches,
+            "timeouts": timeouts,
+            "crashes": crashes,
         },
         "verdict": "ERROR",
     }
@@ -601,9 +940,18 @@ def main() -> int:
     )
     parser.add_argument("--candidate-id", default=None, help="authoritative fallback candidate_id if inference is unavailable")
     parser.add_argument("--run-id", default=None, help="authoritative fallback run_id if inference is unavailable")
+    parser.add_argument(
+        "--probe-harness",
+        action="store_true",
+        help="print deterministic lli harness discovery report and exit",
+    )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[2]
+    if args.probe_harness:
+        print(json.dumps(_discover_lli_abi_mechanism(repo_root), indent=2))
+        return 0
+
     try:
         out = run_step_a(
             repo_root=repo_root,

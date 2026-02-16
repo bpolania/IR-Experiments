@@ -1,8 +1,8 @@
-# Phase 2 Runner - Step A + Step B + Step C + Step D
+# Phase 2 Runner - Step A + Step B + Step C + Step D + Step E
 
-This module provides the Phase 2 Step A skeleton for Experiment 1.
+This module provides the Phase 2 Step A..E skeleton for Experiment 1.
 
-Step A/Step B/Step C/Step D behavior:
+Step A/Step B/Step C/Step D/Step E behavior:
 - Loads frozen artifacts (tool snapshot, limits, schema, and test vectors).
 - Discovers candidate `.ll` deterministically using explicit `--candidate`.
 - Recovers authoritative `candidate_id` / `run_id` rules using repo evidence precedence:
@@ -29,6 +29,19 @@ Step A/Step B/Step C/Step D behavior:
   - limits: `harness/constants.json` → `limits.timeout_stage_ms`, `limits.max_rss_mib`
   - invocation in work dir: `opt -verify -disable-output candidate.bc`
   - deterministic environment: `LC_ALL=C`, `LANG=C`, `TZ=UTC`
+- Adds Step E `lli_tests` gate precedence:
+  - runs only when `precheck`, `llvm_as_parse`, and `opt_verify` all pass and `work/candidate.bc` exists and is non-empty
+  - frozen `lli` path from `env/tool_versions.json` (`detected.lli.path`, fallback `detected.llvm-lli.path`)
+  - per-test limits loaded from `harness/constants.json` keys:
+    - `limits.timeout_per_test_ms`
+    - `limits.max_rss_mib`
+  - if Stage 4 preconditions fail, `lli_tests` remains NOT_RUN
+  - if `lli` path is missing/not executable and Stage 4 is eligible, `lli_tests` is recorded as failure with `POLICY_VIOLATION`
+  - ABI invocation mechanism is not guessed; deterministic repo-wide discovery is used:
+    - search order: `irx/experiment1/harness/` first, then `irx/experiment1/`
+    - `irx/experiment1/runs/` is excluded from discovery
+    - deterministic failure detail includes searched dirs/patterns and capped inspected-file sample
+  - if schema lacks explicit per-test result container, Stage 4 fails deterministically with `ERR_INTERNAL(-3)` detail in artifact
 - Emits a schema-validated result to `irx/experiment1/runs/<candidate_id>/<run_id>.json`.
 
 No LLVM tools are executed in Step A.
@@ -82,4 +95,16 @@ Run verify-fail case (IR that parses but fails `opt -verify`):
 
 ```bash
 python3 runner/phase2/phase2_runner.py --candidate /tmp/cand_verify_fail.ll
+```
+
+Step E precedence check (current host where `llvm-as` may be non-executable):
+
+```bash
+python3 runner/phase2/phase2_runner.py --candidate /tmp/valid.ll
+```
+
+Step E harness discovery self-check (does not execute LLVM tools):
+
+```bash
+python3 runner/phase2/phase2_runner.py --probe-harness
 ```

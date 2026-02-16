@@ -2,6 +2,69 @@
 
 IR Experiments is a repository for structured, repeatable intermediate-representation (IR) research workflows. It is organized to keep each experiment self-contained, with frozen inputs, clear phase boundaries, and dedicated documentation so results can be reproduced consistently.
 
+## Raspberry Pi (ARM64) execution notes (Experiment 1)
+
+This repo is designed to run deterministically against a frozen toolchain snapshot. On Raspberry Pi (ARM64), you must ensure the LLVM tool paths match the snapshot in:
+
+- `irx/experiment1/env/tool_versions.json`
+
+### Required tools (Pi, ARM64)
+
+You need these executables available and executable at the exact absolute paths referenced in `tool_versions.json`:
+
+- `llvm-as`
+- `opt`
+- `lli`
+- (later phases) `llc`, `clang`
+
+If your system installs LLVM under different paths, you must either:
+- install LLVM so the binaries exist at the snapshot paths, or
+- update `tool_versions.json` only if you are explicitly revising the toolchain snapshot (authority change).
+
+### Quick preflight on Pi
+
+From repo root:
+
+```bash
+python3 -m py_compile runner/phase2/phase2_runner.py
+python3 -m py_compile irx/experiment1/harness/lli_abi_runner.py
+python3 runner/phase2/phase2_runner.py --probe-harness
+```
+
+### Build the frozen lli shim (required for Phase 2 Step E)
+
+The ABI harness expects a shim bitcode module (`shim.bc`) built from:
+- `irx/experiment1/harness/lli_shim/shim.c`
+
+Build on Pi using the frozen toolchain (paths must match `tool_versions.json`):
+
+```bash
+cd irx/experiment1/harness/lli_shim
+
+# Use clang from the frozen snapshot path if available; otherwise use the system clang
+# ONLY if it matches the intended snapshot (authority).
+/usr/lib/llvm-19/bin/clang -O0 -S -emit-llvm shim.c -o shim.ll
+/usr/lib/llvm-19/bin/llvm-as shim.ll -o shim.bc
+
+ls -l shim.bc
+```
+
+Do not change the shim source or ABI without an authority revision.
+
+### Running Phase 2 runner (current incremental gates)
+
+Phase 2 runner emits artifacts under:
+- `irx/experiment1/runs/<candidate_id>/<run_id>.json`
+- `irx/experiment1/runs/<candidate_id>/<run_id>/work/`
+
+Example:
+
+```bash
+python3 runner/phase2/phase2_runner.py --candidate /tmp/cand.ll
+```
+
+The runner is artifact-first: even when a gate fails (missing tool, parse/verify failure, etc.), it should still emit a schema-valid result JSON.
+
 ## Repository Structure
 
 The repository groups experiment work under `irx/`, with each experiment in its own directory.
