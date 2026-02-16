@@ -1,8 +1,8 @@
-# Phase 2 Runner - Step A + Step B + Step C + Step D + Step E + Step F
+# Phase 2 Runner - Step A + Step B + Step C + Step D + Step E + Step F + Step G
 
-This module provides the Phase 2 Step A..F skeleton for Experiment 1.
+This module provides the Phase 2 Step A..G skeleton for Experiment 1.
 
-Step A/Step B/Step C/Step D/Step E/Step F behavior:
+Step A/Step B/Step C/Step D/Step E/Step F/Step G behavior:
 - Loads frozen artifacts (tool snapshot, limits, schema, and test vectors).
 - Discovers candidate `.ll` deterministically using explicit `--candidate`.
 - Recovers authoritative `candidate_id` / `run_id` rules using repo evidence precedence:
@@ -48,6 +48,19 @@ Step A/Step B/Step C/Step D/Step E/Step F behavior:
   - output artifact in work dir: `candidate.o`
   - deterministic invocation: `llc -filetype=obj -mtriple=<target_triple> -O0 -o candidate.o candidate.bc`
   - deterministic environment and resource controls reuse shared LLVM runtime helpers (`LC_ALL/LANG/TZ`, derived `LD_LIBRARY_PATH` only, RSS-only preexec)
+- Adds Step G `clang_link` gate precedence:
+  - runs only when `precheck`, `llvm_as_parse`, `opt_verify`, `lli_tests`, and `llc_compile` all pass and `work/candidate.o` exists and is non-empty
+  - frozen `clang` path from `env/tool_versions.json` (`detected.clang.path`, fallback `detected.llvm-clang.path`)
+  - target triple from `env/target.json` (`target_triple` or `triple`)
+  - output artifact in work dir: `candidate.exe`
+  - deterministic invocation: `clang -target <triple> -fuse-ld=lld -nostdlib -Wl,--no-dynamic-linker -Wl,-e,f -o candidate.exe candidate.o`
+    - `-fuse-ld=lld`: use colocated LLD linker from same LLVM installation; avoids PATH dependency in deterministic env
+    - `-nostdlib`: no CRT objects — candidate exports only `@f`, no `main`/`_start`
+    - `-Wl,--no-dynamic-linker`: static ELF, no PT_INTERP
+    - `-Wl,-e,f`: entry point set to `f` symbol
+  - deterministic environment and resource controls reuse shared LLVM runtime helpers (`LC_ALL/LANG/TZ`, derived `LD_LIBRARY_PATH` only, RSS-only preexec via `_prepare_clang_runtime`)
+  - failure mapping identical to `llc_compile`: TIMEOUT, OOM heuristic, signal mapping, POLICY_VIOLATION for nonzero exit or missing/empty output
+  - Step H (`native_tests`) remains NOT_RUN
 - Emits a schema-validated result to `irx/experiment1/runs/<candidate_id>/<run_id>.json`.
 
 No LLVM tools are executed in Step A.

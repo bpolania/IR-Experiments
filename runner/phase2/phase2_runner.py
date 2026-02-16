@@ -248,6 +248,35 @@ def _resolve_llc_path(artifacts: dict[str, Any], repo_root: Path) -> tuple[str |
     return path, f"llc_executable path={path} source={source}"
 
 
+def _resolve_clang_path(artifacts: dict[str, Any], repo_root: Path) -> tuple[str | None, str]:
+    tool_versions = artifacts["tool_versions"]
+    tv_path = artifacts["tool_versions_path"]
+    source = str(tv_path.relative_to(repo_root))
+    detected = tool_versions.get("detected")
+    if not isinstance(detected, dict):
+        return None, f"clang_not_found_in_tool_versions key=detected.clang.path source={source}"
+
+    key_used = None
+    clang_entry = None
+    if isinstance(detected.get("clang"), dict):
+        key_used = "clang"
+        clang_entry = detected["clang"]
+    elif isinstance(detected.get("llvm-clang"), dict):
+        key_used = "llvm-clang"
+        clang_entry = detected["llvm-clang"]
+
+    if not isinstance(clang_entry, dict):
+        return None, f"clang_not_found_in_tool_versions key=detected.clang.path source={source}"
+
+    path = clang_entry.get("path")
+    if not isinstance(path, str) or len(path.strip()) == 0:
+        return None, f"clang_not_found_in_tool_versions key=detected.{key_used}.path source={source}"
+    p = Path(path)
+    if not p.is_file() or not os.access(str(p), os.X_OK):
+        return None, f"clang_not_executable path={path} source={source}"
+    return path, f"clang_executable path={path} source={source}"
+
+
 def _resolve_target_triple(artifacts: dict[str, Any], repo_root: Path) -> tuple[str | None, str]:
     target_obj = artifacts["target"]
     target_path = artifacts["target_path"]
@@ -982,6 +1011,117 @@ def _run_llc_compile(
     return False, "LLC_COMPILE_FAIL:policy_violation"
 
 
+def _run_clang_link(
+    *,
+    clang_path: str,
+    target_triple: str,
+    work_dir: Path,
+    timeout_stage_ms: int,
+    max_rss_mib: int,
+    stage_record: dict[str, Any],
+) -> tuple[bool, str]:
+    out_name = "candidate.exe"
+    out_path = work_dir / out_name
+    if out_path.exists():
+        out_path.unlink()
+
+    env, preexec_fn, _ = _prepare_clang_runtime(clang_path, max_rss_mib)
+    proc = subprocess.Popen(
+        [
+            clang_path,
+            "-target", target_triple,
+            "-fuse-ld=lld",
+            "-nostdlib",
+            "-Wl,--no-dynamic-linker",
+            "-Wl,-e,f",
+            "-o", out_name,
+            "candidate.o",
+        ],
+        cwd=str(work_dir),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+        preexec_fn=preexec_fn,
+    )
+
+    timed_out = False
+    try:
+        _, stderr = proc.communicate(timeout=timeout_stage_ms / 1000.0)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        _, stderr = proc.communicate()
+
+    rc = proc.returncode if proc.returncode is not None else -1
+    stderr_text = (stderr or "").strip()
+    stage_record["duration_ms"] = 0
+    stage_record["rss_mib"] = None
+
+    if timed_out:
+        stage_record["ok"] = False
+        stage_record["exit_code"] = None
+        stage_record["crash"] = {
+            "type": "TIMEOUT",
+            "signal": None,
+            "detail": f"clang_link_timeout ms={timeout_stage_ms}",
+        }
+        return False, "CLANG_LINK_FAIL:timeout"
+
+    if rc == 0:
+        if not out_path.exists() or out_path.stat().st_size == 0:
+            stage_record["ok"] = False
+            stage_record["exit_code"] = 0
+            stage_record["crash"] = {
+                "type": "POLICY_VIOLATION",
+                "signal": None,
+                "detail": "clang_link_output_missing_or_empty path=candidate.exe",
+            }
+            return False, "CLANG_LINK_FAIL:missing_or_empty_output"
+        stage_record["ok"] = True
+        stage_record["exit_code"] = 0
+        stage_record["crash"] = None
+        return True, "CLANG_LINK_PASS"
+
+    if rc < 0:
+        sig_num = -rc
+        mapped = _map_signal_to_crash_type(sig_num)
+        if mapped is not None:
+            stage_record["ok"] = False
+            stage_record["exit_code"] = None
+            stage_record["crash"] = {
+                "type": mapped,
+                "signal": sig_num,
+                "detail": f"clang terminated by signal {sig_num}",
+            }
+            return False, f"CLANG_LINK_FAIL:signal_{sig_num}"
+
+    lower_err = stderr_text.lower()
+    if "out of memory" in lower_err or "cannot allocate memory" in lower_err:
+        stage_record["ok"] = False
+        stage_record["exit_code"] = rc if rc >= 0 else None
+        stage_record["crash"] = {
+            "type": "OOM",
+            "signal": None if rc >= 0 else -rc,
+            "detail": "clang reported memory exhaustion",
+        }
+        return False, "CLANG_LINK_FAIL:oom"
+
+    stage_record["ok"] = False
+    stage_record["exit_code"] = rc if rc >= 0 else None
+    stage_record["crash"] = {
+        "type": "POLICY_VIOLATION",
+        "signal": None if rc >= 0 else -rc,
+        "detail": f"clang_link_failed exit_code={rc}",
+    }
+    return False, "CLANG_LINK_FAIL:policy_violation"
+
+
 def run_step_a(
     repo_root: Path,
     task: str,
@@ -1267,6 +1407,60 @@ def run_step_a(
                 if not llc_ok:
                     crashes = 1
 
+    clang_ok = False
+    candidate_o_path = work_dir / "candidate.o"
+    stage6_can_run = (
+        precheck_ok
+        and llvm_as_ok
+        and opt_ok
+        and lli_ok
+        and llc_ok
+        and candidate_o_path.is_file()
+        and candidate_o_path.stat().st_size > 0
+    )
+    if not stage6_can_run:
+        clang_detail = "CLANG_LINK_NOT_RUN:preconditions_failed"
+    else:
+        clang_path, clang_path_detail = _resolve_clang_path(artifacts, repo_root)
+        if clang_path is None:
+            runs_skeleton[5]["ok"] = False
+            runs_skeleton[5]["exit_code"] = None
+            runs_skeleton[5]["duration_ms"] = 0
+            runs_skeleton[5]["rss_mib"] = None
+            runs_skeleton[5]["crash"] = {
+                "type": "POLICY_VIOLATION",
+                "signal": None,
+                "detail": clang_path_detail,
+            }
+            clang_ok = False
+            clang_detail = f"CLANG_LINK_FAIL:{clang_path_detail}"
+        else:
+            target_triple_clang, target_detail_clang = _resolve_target_triple(artifacts, repo_root)
+            if target_triple_clang is None:
+                runs_skeleton[5]["ok"] = False
+                runs_skeleton[5]["exit_code"] = None
+                runs_skeleton[5]["duration_ms"] = 0
+                runs_skeleton[5]["rss_mib"] = None
+                runs_skeleton[5]["crash"] = {
+                    "type": "POLICY_VIOLATION",
+                    "signal": None,
+                    "detail": "clang_link_missing_target_triple source=irx/experiment1/env/target.json",
+                }
+                clang_ok = False
+                clang_detail = (
+                    "CLANG_LINK_FAIL:ERR_INTERNAL(-3): missing/invalid frozen "
+                    "target_triple in irx/experiment1/env/target.json"
+                )
+            else:
+                clang_ok, clang_detail = _run_clang_link(
+                    clang_path=clang_path,
+                    target_triple=target_triple_clang,
+                    work_dir=work_dir,
+                    timeout_stage_ms=timeout_stage_ms,
+                    max_rss_mib=max_rss_mib,
+                    stage_record=runs_skeleton[5],
+                )
+
     result_obj: dict[str, Any] = {
         "experiment": str(artifacts["constants"].get("experiment", "1")),
         "task": task,
@@ -1287,7 +1481,7 @@ def run_step_a(
             },
             "policy": {
                 "ok": False,
-                "detail": loaded_artifacts_detail + ";" + llc_detail,
+                "detail": loaded_artifacts_detail + ";" + llc_detail + ";" + clang_detail,
             },
             "tests": {
                 "ok": lli_ok,

@@ -11,11 +11,11 @@
 
 This report documents the complete Phase 2 lifecycle for Experiment 1 on
 Raspberry Pi 5. The project progressed from a non-functional runner that
-could not even load the LLVM shared library, through five incremental
+could not even load the LLVM shared library, through six incremental
 verification rounds, to a fully operational pipeline that compiles a
-correct LLVM IR candidate into a native aarch64 object file.
+correct LLVM IR candidate into a native aarch64 ELF executable.
 
-Six generations of work:
+Seven generations of work:
 
 1. **Initial** — llvm-as failed at runtime: missing `LD_LIBRARY_PATH` in the
    cleared subprocess environment and an overly restrictive `RLIMIT_AS`
@@ -38,11 +38,18 @@ Six generations of work:
    achieves 10/10 lli_tests, llc_compile executes, and `candidate.o` (1 008
    bytes, aarch64 ELF relocatable) is produced. Evidence bundle and
    reproducible check script committed.
+7. **Step G implementation** — `clang_link` stage wired into the runner.
+   Links `candidate.o` into a minimal static ELF executable `candidate.exe`
+   using clang with LLD. The candidate exports only `@f` (no `main`, no
+   `_start`), so the link uses `-nostdlib -fuse-ld=lld -Wl,--no-dynamic-linker
+   -Wl,-e,f` to produce a freestanding binary with `f` as its entry point.
+   Verified on Pi: `candidate.exe` produced (2 304 bytes), deterministic
+   across runs. Step H (`native_tests`) remains NOT_RUN.
 
-**Final status**: Phase 2 verified end-to-end through Step F (llc_compile).
+**Final status**: Phase 2 verified end-to-end through Step G (clang_link).
 The pipeline accepts a `.ll` candidate, validates it, runs it against frozen
-test vectors under lli, and compiles it to a native object file. Steps G-H
-(clang_link, native_tests) remain unwired in the runner.
+test vectors under lli, compiles it to a native object file, and links it
+into an executable. Step H (native_tests) remains the sole unwired stage.
 
 ---
 
@@ -65,7 +72,7 @@ Results are recorded in a schema-validated JSON artifact under
 | 2 | `opt_verify` | `/usr/lib/llvm-19/bin/opt` | llvm_as_parse.ok, candidate.bc exists |
 | 3 | `lli_tests` | `/usr/lib/llvm-19/bin/lli` + harness | opt_verify.ok, harness resolved, task vectors loaded |
 | 4 | `llc_compile` | `/usr/lib/llvm-19/bin/llc` | lli_tests.ok, candidate.bc exists |
-| 5 | `clang_link` | `/usr/lib/llvm-19/bin/clang` | llc_compile.ok (not yet wired) |
+| 5 | `clang_link` | `/usr/lib/llvm-19/bin/clang` | llc_compile.ok, candidate.o exists |
 | 6 | `native_tests` | native binary | clang_link.ok (not yet wired) |
 
 Each stage either executes and records its result, or is marked NOT_RUN:
@@ -96,6 +103,11 @@ LC_ALL=C  LANG=C  TZ=UTC  LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
 `LD_LIBRARY_PATH` is derived deterministically from the frozen tool path
 (`parent.parent / lib`). No host environment variables are consulted.
 
+The `clang_link` stage additionally uses `-fuse-ld=lld` to ensure clang
+finds its colocated LLD linker without requiring `PATH` in the environment.
+This is necessary because clang, unlike the other LLVM tools, spawns a
+child linker process and needs to locate it.
+
 ### 2.5 Resource Limits
 
 `RLIMIT_RSS` is applied at `max_rss_mib = 64` MiB on Linux. `RLIMIT_AS`
@@ -115,9 +127,11 @@ beyond 64 MiB for its memory-mapped segments.
 | opt | `/usr/lib/llvm-19/bin/opt` | 19.1.7 |
 | lli | `/usr/lib/llvm-19/bin/lli` | 19.1.7 |
 | llc | `/usr/lib/llvm-19/bin/llc` | 19.1.7 |
-| clang | `/usr/lib/llvm-19/bin/clang` | 19.1.7 |
+| clang | `/usr/lib/llvm-19/bin/clang` | 19.1.7 (Debian) |
 
-All confirmed present, executable, owned by root.
+All confirmed present, executable, owned by root. The `opt` and `llc`
+entries include host CPU detection (`cortex-a76`) and target triple
+confirmation (`aarch64-unknown-linux-gnu`).
 
 ### 3.2 Limits (`harness/constants.json`)
 
@@ -128,9 +142,14 @@ All confirmed present, executable, owned by root.
 | `max_basic_blocks` | 200 | reserved |
 | `max_instructions` | 20 000 | reserved |
 | `max_alloca_bytes_total` | 4 096 | reserved |
-| `timeout_stage_ms` | 1 000 | llvm_as, opt, llc |
+| `timeout_stage_ms` | 1 000 | llvm_as, opt, llc, clang |
 | `timeout_per_test_ms` | 50 | lli_tests |
 | `max_rss_mib` | 64 | all tool stages |
+| `max_input_bytes` | 65 536 | reserved |
+| `max_output_bytes` | 65 536 | reserved |
+
+Error codes defined in constants: `ERR_INVALID_INPUT` (-1),
+`ERR_OUTPUT_TOO_SMALL` (-2), `ERR_INTERNAL` (-3).
 
 ### 3.3 Target (`env/target.json`)
 
@@ -138,7 +157,8 @@ All confirmed present, executable, owned by root.
 {"os": "raspios64", "arch": "aarch64", "triple": "aarch64-unknown-linux-gnu", "endian": "little"}
 ```
 
-Note: the key is `triple`, not `target_triple`. The runner accepts both (Patch 2, section 6.2).
+Note: the key is `triple`, not `target_triple`. The runner accepts both
+(Patch 2, section 6.2).
 
 ### 3.4 ID Rules (`harness/id_rules.json`)
 
@@ -351,7 +371,7 @@ gate for llc_compile opened.
 - Sums consecutive LE u32 values with wrapping `add i32`
 - Stores 4-byte LE result to `out_ptr`, returns `4`
 
-### 8.2 Full Pipeline Results
+### 8.2 Full Pipeline Results (through Step F)
 
 | Stage | ok | exit_code | Notes |
 |-------|----|-----------|-------|
@@ -360,10 +380,164 @@ gate for llc_compile opened.
 | opt_verify | true | 0 | `-passes=verify` pass |
 | lli_tests | true | 0 | 10/10 pass, 0 failures |
 | llc_compile | true | 0 | candidate.o = 1 008 bytes |
-| clang_link | false | — | NOT_RUN (not yet wired) |
+| clang_link | false | — | NOT_RUN (not yet wired at this generation) |
 | native_tests | false | — | NOT_RUN (not yet wired) |
 
-### 8.3 Metrics
+### 8.3 Work Artifacts (through Step F)
+
+| File | Size |
+|------|------|
+| `work/candidate.ll` | 1 232 bytes |
+| `work/candidate.bc` | 1 928 bytes |
+| `work/candidate.o` | 1 008 bytes |
+
+### 8.4 llc Invocation Detail
+
+```
+llc_path:       /usr/lib/llvm-19/bin/llc (from tool_versions.json)
+target_triple:  aarch64-unknown-linux-gnu (from target.json, key "triple")
+command:        llc -filetype=obj -mtriple=aarch64-unknown-linux-gnu -O0 -o candidate.o candidate.bc
+stderr:         [llc] LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+```
+
+---
+
+## 9 Generation 6: Step G Implemented — clang_link Produces candidate.exe
+
+### 9.1 Design Challenge
+
+The candidate exports only `i64 @f(ptr, i32, ptr, i32)` — there is no `main`
+function and no `_start` symbol. A standard `clang -o candidate.exe candidate.o`
+invocation will fail because the system linker expects `_start` (normally
+provided by the C runtime's `crt1.o`).
+
+Three approaches were evaluated:
+
+1. `clang -o candidate.exe candidate.o` — fails: undefined reference to `_start`
+2. `clang -nostdlib -o candidate.exe candidate.o` — fails: still expects `_start`
+   as the default entry point
+3. `clang -nostdlib -fuse-ld=lld -Wl,--no-dynamic-linker -Wl,-e,f -o candidate.exe candidate.o`
+   — produces a minimal static ELF with `f` as the entry point, no CRT, no
+   dynamic linker, fully deterministic
+
+Option 3 was selected. The `-fuse-ld=lld` flag was added because the runner's
+deterministic subprocess environment contains no `PATH` variable, and clang
+needs to locate a linker binary. With `-fuse-ld=lld`, clang uses its colocated
+`ld.lld` from the same LLVM installation directory, eliminating any PATH
+dependency.
+
+### 9.2 Implementation
+
+Three additions to `runner/phase2/phase2_runner.py`:
+
+**`_resolve_clang_path(artifacts, repo_root)`** — Mirrors `_resolve_llc_path`.
+Checks `detected.clang.path` (primary) with fallback `detected.llvm-clang.path`.
+Verifies the file exists and is executable. Returns `(path, detail_str)` or
+`(None, error_detail)`.
+
+**`_run_clang_link(...)`** — Mirrors `_run_llc_compile`. Runs clang with:
+
+```
+clang -target <triple> -fuse-ld=lld -nostdlib -Wl,--no-dynamic-linker -Wl,-e,f -o candidate.exe candidate.o
+```
+
+Failure mapping identical to `_run_llc_compile`:
+- `subprocess.TimeoutExpired` → TIMEOUT
+- Signal termination → mapped crash type (SIGSEGV, SIGILL, SIGABRT, SIGFPE)
+- stderr "out of memory" / "cannot allocate memory" → OOM
+- Nonzero exit → POLICY_VIOLATION
+- Missing/empty output after rc=0 → POLICY_VIOLATION
+- Success → `(True, "CLANG_LINK_PASS")`
+
+Uses `_prepare_clang_runtime` (already existed since Generation 1) for
+deterministic environment setup and RSS-only preexec.
+
+**Stage 6 execution block** — Added after the `llc_compile` block. Gated on:
+
+```python
+stage6_can_run = (
+    precheck_ok and llvm_as_ok and opt_ok and lli_ok and llc_ok
+    and candidate_o_path.is_file()
+    and candidate_o_path.stat().st_size > 0
+)
+```
+
+Resolves clang path and target triple independently (same `_resolve_target_triple`
+used by llc_compile). Updates `gates.policy.detail` to include `clang_detail`.
+
+### 9.3 Verification Results
+
+Full pipeline run with the known-good candidate:
+
+| Stage | ok | exit_code | Notes |
+|-------|----|-----------|-------|
+| precheck | true | — | bytes=1232/65536, lines=42/2000 |
+| llvm_as_parse | true | 0 | candidate.bc produced |
+| opt_verify | true | 0 | `-passes=verify` pass |
+| lli_tests | true | 0 | 10/10 pass, 0 failures |
+| llc_compile | true | 0 | candidate.o = 1 008 bytes |
+| clang_link | true | 0 | candidate.exe = 2 304 bytes |
+| native_tests | false | — | NOT_RUN |
+
+### 9.4 Work Artifacts (through Step G)
+
+| File | Size | Format |
+|------|------|--------|
+| `work/candidate.ll` | 1 232 bytes | LLVM IR text |
+| `work/candidate.bc` | 1 928 bytes | LLVM bitcode |
+| `work/candidate.o` | 1 008 bytes | aarch64 ELF relocatable |
+| `work/candidate.exe` | 2 304 bytes | aarch64 ELF executable (static) |
+
+### 9.5 clang Invocation Detail
+
+```
+clang_path:      /usr/lib/llvm-19/bin/clang (from tool_versions.json, key "detected.clang")
+target_triple:   aarch64-unknown-linux-gnu (from target.json, key "triple")
+linker:          /usr/lib/llvm-19/bin/ld.lld (colocated, selected via -fuse-ld=lld)
+command:         clang -target aarch64-unknown-linux-gnu -fuse-ld=lld -nostdlib
+                       -Wl,--no-dynamic-linker -Wl,-e,f -o candidate.exe candidate.o
+environment:     LC_ALL=C LANG=C TZ=UTC LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+preexec:         RLIMIT_RSS=64 MiB (RLIMIT_AS not set)
+stderr:          [clang] LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+```
+
+### 9.6 Executable Properties
+
+The produced `candidate.exe` is a minimal static ELF:
+- No dynamic linker (no PT_INTERP segment)
+- No CRT objects linked (no `_start`, no `__libc_start_main`)
+- Entry point is the `f` symbol directly
+- No shared library dependencies
+- Suitable for Step H native testing (the harness will call `f` directly
+  or set up the appropriate calling convention)
+
+### 9.7 Determinism
+
+Two runs with clean artifact directory between each produced identical:
+- `candidate_id`: `de499765dfe2e94002b34a27d113273ffe5c4345c6463f665f87cc5b2fb610b6`
+- `run_id`: `4254c62717bfc6fbabf0ca1cf107b9519e030649890ea8b3d8acf9c9367f5d60`
+
+### 9.8 PATH-less Linker Discovery
+
+During initial Step G testing, clang failed with:
+
+```
+clang: error: unable to execute command: Executable "ld" doesn't exist!
+```
+
+Root cause: the deterministic subprocess environment contains only `LC_ALL`,
+`LANG`, `TZ`, and `LD_LIBRARY_PATH` — no `PATH`. Unlike `llvm-as`, `opt`,
+`lli`, and `llc` (which are self-contained single-process tools), clang
+invokes a child linker process and searches `PATH` to find it.
+
+Resolution: `-fuse-ld=lld` tells clang to use its colocated LLD linker
+(`/usr/lib/llvm-19/bin/ld.lld`), which it finds via its own installation
+directory without consulting `PATH`. This preserves the deterministic
+no-PATH environment used by all other stages.
+
+---
+
+## 10 Metrics Summary (Known-Good Candidate)
 
 ```
 tests_total:        10
@@ -376,47 +550,19 @@ crashes:             0
 test_results count: 10
 ```
 
-### 8.4 Artifact IDs (deterministic)
+### 10.1 Artifact IDs (deterministic)
 
 ```
 candidate_id: de499765dfe2e94002b34a27d113273ffe5c4345c6463f665f87cc5b2fb610b6
 run_id:       4254c62717bfc6fbabf0ca1cf107b9519e030649890ea8b3d8acf9c9367f5d60
 ```
 
-Confirmed stable across three independent runs with clean artifact directory
+Confirmed stable across independent runs with clean artifact directory
 between each.
-
-### 8.5 Work Artifacts
-
-| File | Size |
-|------|------|
-| `work/candidate.ll` | 1 232 bytes |
-| `work/candidate.bc` | 1 928 bytes |
-| `work/candidate.o` | 1 008 bytes |
-
-### 8.6 llc Invocation Detail
-
-```
-llc_path:       /usr/lib/llvm-19/bin/llc (from tool_versions.json)
-target_triple:  aarch64-unknown-linux-gnu (from target.json, key "triple")
-command:        llc -filetype=obj -mtriple=aarch64-unknown-linux-gnu -O0 -o candidate.o candidate.bc
-stderr:         [llc] LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
-```
-
-### 8.7 Tool Environment Lines (stderr)
-
-All four tool stages logged their deterministic environment:
-
-```
-[llvm-as] LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
-[opt]     LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
-[lli]     harness=irx/experiment1/harness/lli_abi_runner.py
-[llc]     LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
-```
 
 ---
 
-## 9 Stub Candidate Baseline
+## 11 Stub Candidate Baseline
 
 The minimal stub (`ret i64 0`) was re-run after the authority revision to
 confirm baseline gate behavior:
@@ -428,13 +574,16 @@ confirm baseline gate behavior:
 | opt_verify | true | 0 |
 | lli_tests | false | 1 |
 | llc_compile | false | — (NOT_RUN) |
+| clang_link | false | — (NOT_RUN) |
+| native_tests | false | — (NOT_RUN) |
 
 ```
 tests_total: 10, tests_passed: 0, tests_failed: 10
 ```
 
 The stub returns `0` for all inputs. All 10 tests fail (RETURN_MISMATCH).
-llc_compile remains correctly gated behind `lli_tests.ok=true`.
+llc_compile, clang_link, and native_tests remain correctly gated behind
+upstream stage passes.
 
 Stub IDs:
 
@@ -445,9 +594,9 @@ run_id:       a3e8ff76d6f6e055b3ef1e26dcb39dac8b73360a071e6df2b6eebdda80ee46f7
 
 ---
 
-## 10 Verification Fixtures and Evidence
+## 12 Verification Fixtures and Evidence
 
-### 10.1 Directory Layout
+### 12.1 Directory Layout
 
 ```
 irx/experiment1/verification/
@@ -463,7 +612,7 @@ irx/experiment1/verification/
     README.md                                Step F fixture documentation
 ```
 
-### 10.2 Committed Fixtures
+### 12.2 Committed Fixtures
 
 | File | Purpose |
 |------|---------|
@@ -472,7 +621,7 @@ irx/experiment1/verification/
 | `verification/evidence/STEP_F_EVIDENCE.md` | Step F reproduction commands, PASS conditions, expected deterministic IDs |
 | `verification/evidence/step_f_check.sh` | Automated script: cleans runs, runs pipeline, prints summary |
 
-### 10.3 Running the Evidence Check
+### 12.3 Running the Evidence Check
 
 ```bash
 bash irx/experiment1/verification/evidence/step_f_check.sh
@@ -481,14 +630,29 @@ bash irx/experiment1/verification/evidence/step_f_check.sh
 Expected output includes:
 
 - `py_compile: OK`
-- Tool env lines for llvm-as, opt, lli, llc
-- All stages precheck through llc_compile: `ok=True`
+- Tool env lines for llvm-as, opt, lli, llc, clang
+- All stages precheck through clang_link: `ok=True`
 - `tests: 10/10 passed, 0 failed`
 - `candidate.o: EXISTS (1008 bytes)`
+- `candidate.exe: EXISTS (2304 bytes)`
 
 ---
 
-## 11 Commit History
+## 13 Tool Environment Lines (stderr)
+
+All five tool stages log their deterministic environment on stderr:
+
+```
+[llvm-as] LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[opt]     LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[lli]     harness=irx/experiment1/harness/lli_abi_runner.py
+[llc]     LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+[clang]   LD_LIBRARY_PATH=/usr/lib/llvm-19/lib
+```
+
+---
+
+## 14 Commit History
 
 | Hash | Message |
 |------|---------|
@@ -498,10 +662,11 @@ Expected output includes:
 | `31223ce` | exp1: fix sum_u32_le t08 expected_out_hex endianness (unblocks Step F) |
 | `1153420` | exp1: add verification fixture directory and run instructions |
 | `f0a6261` | exp1: add Step F evidence bundle and check script |
+| `89e6f50` | docs: rewrite pi_report with Step F evidence and full verification history |
 
 ---
 
-## 12 Properties Verified
+## 15 Properties Verified
 
 1. **Determinism**: The subprocess environment is derived entirely from frozen
    artifacts. No host environment variables are consulted. Repeated runs with
@@ -510,9 +675,8 @@ Expected output includes:
 
 2. **Isolation**: The subprocess environment contains exactly four variables
    (`LC_ALL=C`, `LANG=C`, `TZ=UTC`, `LD_LIBRARY_PATH=/usr/lib/llvm-19/lib`).
-   No user environment leaks through. The lli harness uses an even more
-   minimal environment (`LC_ALL=C`, `LANG=C`, `TZ=UTC` — no LD_LIBRARY_PATH
-   needed for lli itself).
+   No user environment leaks through. The clang_link stage uses `-fuse-ld=lld`
+   to avoid requiring `PATH`.
 
 3. **Resource Limits**: `RLIMIT_RSS` is applied at 64 MiB to bound physical
    memory consumption. `RLIMIT_AS` is not applied, allowing the 123 MB
@@ -526,23 +690,27 @@ Expected output includes:
 
 5. **Gate Ordering**: Each stage runs only when its preconditions are met.
    Failure at any stage propagates NOT_RUN to all downstream stages.
-   llc_compile is correctly blocked until lli_tests passes. This was
-   confirmed both with the stub (0/10 -> llc NOT_RUN) and the known-good
-   candidate (10/10 -> llc executes).
+   clang_link is correctly blocked until llc_compile passes (which requires
+   lli_tests pass). This was confirmed with the stub (0/10 -> llc NOT_RUN ->
+   clang NOT_RUN) and the known-good candidate (10/10 -> llc PASS -> clang PASS).
 
 6. **Artifact Integrity**: `candidate.bc` is produced after llvm_as_parse and
    is non-empty. `candidate.o` is produced after llc_compile and is non-empty.
-   Both reside at deterministic paths under `work/`.
+   `candidate.exe` is produced after clang_link and is non-empty. All reside
+   at deterministic paths under `work/`.
 
 7. **End-to-End**: A correct candidate traverses all implemented stages
-   (precheck through llc_compile) and produces a native aarch64 ELF
-   relocatable object file. The pipeline is ready for clang_link and
-   native_tests to be wired.
+   (precheck through clang_link) and produces a native aarch64 ELF executable.
+   The pipeline is ready for native_tests (Step H) to be wired.
 
 8. **Authority Revision Integrity**: The t08 vector correction changed exactly
    one field in one file. No other vectors, indices, or behavioral semantics
    were altered. The correction was verified by achieving 10/10 pass with a
    candidate whose arithmetic is independently verifiable.
+
+9. **Linker Determinism**: The clang_link stage uses the colocated LLD linker
+   via `-fuse-ld=lld`, producing the same static ELF output regardless of
+   which system linkers are installed or what `PATH` is configured on the host.
 
 ---
 
@@ -587,7 +755,34 @@ Cross-check with t04 (sum=3):
   BE: "00000003"  does not match    (BE convention rejected)
 ```
 
-## Appendix D — Reproduction Commands
+## Appendix D — clang_link Flag Rationale
+
+```
+-target aarch64-unknown-linux-gnu     Target triple from frozen target.json
+-fuse-ld=lld                          Colocated LLD; avoids PATH dependency
+-nostdlib                             No CRT (crt1.o, crti.o, etc.)
+-Wl,--no-dynamic-linker              No PT_INTERP; static ELF
+-Wl,-e,f                             Entry point = f symbol (no _start needed)
+-o candidate.exe                      Output binary
+candidate.o                           Input object from llc
+```
+
+Why each flag is necessary:
+
+- The candidate defines only `i64 @f(...)`. There is no `main` or `_start`.
+  Without `-nostdlib`, the linker attempts to pull in CRT objects that expect
+  `main`, causing an undefined reference error.
+- Without `-Wl,-e,f`, the linker defaults to `_start` as entry point and
+  emits "cannot find entry symbol `_start`".
+- Without `-fuse-ld=lld`, clang searches `PATH` for `ld`. The deterministic
+  subprocess environment has no `PATH`, so clang fails with "Executable `ld`
+  doesn't exist!".
+- Without `-Wl,--no-dynamic-linker`, the linker may insert a PT_INTERP
+  segment referencing `/lib/ld-linux-aarch64.so.1`. Since the binary has no
+  shared library dependencies, this is unnecessary and adds a non-deterministic
+  element.
+
+## Appendix E — Reproduction Commands
 
 ```bash
 # Syntax check
@@ -598,19 +793,19 @@ python3 runner/phase2/phase2_runner.py \
   --candidate irx/experiment1/verification/candidates/sum_u32_le_known_good.ll \
   --task sum_u32_le
 
-# Full A-F check (known-good candidate, expects all PASS)
+# Full A-G check (known-good candidate, expects all PASS through clang_link)
 python3 runner/phase2/phase2_runner.py \
   --candidate irx/experiment1/verification/step_f/sum_u32_le_good.ll \
   --task sum_u32_le
 
-# Automated evidence check
+# Automated evidence check (Steps A-F)
 bash irx/experiment1/verification/evidence/step_f_check.sh
 
 # Inspect newest artifact
 ls -lt irx/experiment1/runs/*/*.json | head -n 1
 ```
 
-## Appendix E — Test Vector Summary (sum_u32_le)
+## Appendix F — Test Vector Summary (sum_u32_le)
 
 ```
 t01: in=""                                 ret=4   out="00000000"  (0 values, sum=0)
@@ -628,4 +823,4 @@ t10: in="01000000020000000300000004000000" ret=4   out="0a000000"  (4 values: 1+
 ---
 
 *Verified on Raspberry Pi 5 — Raspberry Pi OS 64-bit — LLVM 19.1.7*
-*Phase 2 end-to-end through Step F: PASS*
+*Phase 2 end-to-end through Step G: PASS*
